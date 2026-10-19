@@ -3,13 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>Allowance</title>
+<title>Spend Tracker</title>
 <meta name="description" content="Personal spending tracker with a weekly budget. Expenses stay on this device.">
 <meta name="theme-color" content="#ECEFF4" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0A0E17" media="(prefers-color-scheme: dark)">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="Allowance">
+<meta name="apple-mobile-web-app-title" content="Spend Tracker">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="format-detection" content="telephone=no">
 <link rel="manifest" href="manifest.webmanifest">
@@ -466,13 +466,13 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
 <body>
 <div class="app">
   <nav class="rail" aria-label="Sections">
-    <p class="wordmark">Allowance</p>
+    <p class="wordmark">Spend Tracker</p>
     <button class="btn primary add-btn" data-act="add"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>Add expenses</button>
     <div id="rail-tabs" style="display:grid;gap:4px"></div>
     <div class="rail-foot"><button class="tab" data-act="settings"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></svg><span>Settings</span></button></div>
   </nav>
   <div class="app-main">
-    <header class="topbar"><p class="wordmark">Allowance</p><span class="spacer"></span><button class="icon-btn" data-act="settings" aria-label="Settings"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></svg></button></header>
+    <header class="topbar"><p class="wordmark">Spend Tracker</p><span class="spacer"></span><button class="icon-btn" data-act="settings" aria-label="Settings"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></svg></button></header>
     <main class="view" id="view"></main>
   </div>
 </div>
@@ -661,7 +661,7 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
 
 </script>
 <script>
-/* Allowance ledger engine: pure, deterministic functions.
+/* Spend Tracker ledger engine: pure, deterministic functions.
    Money is always integer cents. Dates are "YYYY-MM-DD" strings in calendar terms.
    Every total, budget figure and report is derived from the transaction list. */
 (function (root) {
@@ -2865,10 +2865,10 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
       return false;
     }
   }
-  function exportCSV(list, label) { saveFile(`allowance-${label}-${S.today}.csv`, E.toCSV(list)); }
+  function exportCSV(list, label) { saveFile(`spend-tracker-${label}-${S.today}.csv`, E.toCSV(list)); }
   async function exportBackup() {
-    const data = JSON.stringify({ app: "Allowance", version: 1, exported_at: nowISO(), settings: S.settings, merchants: S.learned, transactions: S.txns }, null, 2);
-    const ok = await saveFile(`allowance-backup-${S.today}.json`, data);
+    const data = JSON.stringify({ app: "Spend Tracker", version: 1, exported_at: nowISO(), settings: S.settings, merchants: S.learned, transactions: S.txns }, null, 2);
+    const ok = await saveFile(`spend-tracker-backup-${S.today}.json`, data);
     if (ok) {
       try { await S.cap.db.doc("meta/backup").set({ last: nowISO(), count: S.txns.length }); } catch (e) { /* not critical */ }
       toast(`Backup saved · ${plural(S.txns.length, "expense")}`);
@@ -2877,8 +2877,8 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
   // Restore: adds expenses from a backup file that aren't already here (matched by id), never duplicates.
   async function readBackup(file) {
     let data;
-    try { data = JSON.parse(await file.text()); } catch (e) { return { error: "That file isn't an Allowance backup." }; }
-    if (!data || !Array.isArray(data.transactions)) return { error: "That file isn't an Allowance backup." };
+    try { data = JSON.parse(await file.text()); } catch (e) { return { error: "That file isn't a Spend Tracker backup." }; }
+    if (!data || !Array.isArray(data.transactions)) return { error: "That file isn't a Spend Tracker backup." };
     const have = new Set(S.txns.map((t) => t.id));
     const valid = data.transactions.filter((t) => t && typeof t.id === "string" && /^[A-Za-z0-9_.:-]{1,80}$/.test(t.id) && !E.validateTxn(t).length);
     const fresh = valid.filter((t) => !have.has(t.id));

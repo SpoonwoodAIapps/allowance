@@ -1,4 +1,4 @@
-# Allowance
+# Spend Tracker
 
 A personal spending tracker with a Monday–Sunday weekly budget.
 

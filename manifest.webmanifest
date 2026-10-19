@@ -1,6 +1,6 @@
 {
-  "name": "Allowance",
-  "short_name": "Allowance",
+  "name": "Spend Tracker",
+  "short_name": "Spend Tracker",
   "description": "Personal spending tracker with a weekly budget.",
   "start_url": "./",
   "scope": "./",
