@@ -1,5 +1,5 @@
 /* Offline support: the app opens without a connection; new versions arrive the next time it opens online. */
-const CACHE = "allowance-61bd2235d7";
+const CACHE = "allowance-31f945eee2";
 const SHELL = ["./", "./index.html", "./manifest.webmanifest", "./apple-touch-icon.png", "./icon-192.png", "./icon-512.png", "./favicon.png"];
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));

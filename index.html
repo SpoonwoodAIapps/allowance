@@ -461,6 +461,18 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
 .loading .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); animation: pulse 1s infinite ease-in-out; }
 @keyframes pulse { 0%, 100% { opacity: 0.3; } 50% { opacity: 1; } }
 
+/* Categories editor */
+.catlist { padding: 2px 14px; }
+.catrow { display: flex; align-items: center; gap: 4px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.catrow:last-child { border-bottom: 0; }
+.catrow .cname { flex: 1; min-width: 0; display: grid; }
+.catrow .cname strong { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.catrow .cname span { font-size: 13px; color: var(--muted); }
+.catrow.open { display: grid; gap: 10px; align-items: stretch; padding: 12px 0; }
+.icon-btn[disabled] { opacity: 0.35; cursor: default; }
+.icon-btn[disabled]:hover { background: transparent; }
+.btn svg.i { width: 18px; height: 18px; }
+
 </style>
 </head>
 <body>
@@ -903,7 +915,7 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
         if (!m || !m.name) continue;
         const k = norm(key);
         const prev = idx.get(k);
-        idx.set(k, { name: m.name, category: CATEGORIES.includes(m.category) ? m.category : (prev ? prev.category : "Miscellaneous"), type: m.type || "", learned: true });
+        idx.set(k, { name: m.name, category: typeof m.category === "string" && m.category.trim() ? m.category : (prev ? prev.category : "Miscellaneous"), type: m.type || "", learned: true });
       }
     }
     return idx;
@@ -989,16 +1001,93 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
     return cleanDesc(String(s || "").replace(/\b(mostly|mainly|mostly for|for|some|bunch of|stuff|misc|various|the rest( was)?|rest)\b/gi, " "));
   }
 
-  function classify(merchantName, desc, idxEntry) {
-    const kw = desc ? keywordHit(desc) : null;
-    if (kw && kw.strong) return { category: kw.category, type: kw.type, confident: true, via: "description" };
-    if (idxEntry) return { category: idxEntry.category, type: idxEntry.type || (kw ? kw.type : ""), confident: true, via: idxEntry.learned ? "learned" : "known" };
-    if (kw) return { category: kw.category, type: kw.type, confident: true, via: "description" };
-    const nm = norm(merchantName);
-    for (const [re, cat] of NAME_PATTERNS) if (re.test(nm)) return { category: cat, type: "", confident: true, via: "name" };
-    const kwName = keywordHit(merchantName);
-    if (kwName) return { category: kwName.category, type: kwName.type, confident: kwName.strong, via: "name" };
-    return { category: "Miscellaneous", type: "", confident: false, via: "none" };
+  // ---------- Categories (the user's own list) ----------
+  const MAX_CAT_LEN = 40;
+  function cleanCatName(s) { return String(s || "").replace(/\s+/g, " ").trim(); }
+  function sortCats(list) { return list.slice().sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" })); }
+  // Names match ignoring case and punctuation, so "dining and takeout" finds "Dining & Takeout".
+  function findCat(list, name) { const n = norm(name); if (!n) return null; return (list || []).find((c) => norm(c) === n) || null; }
+  function aliasLookup(alias, name) {
+    if (!alias) return undefined;
+    if (Object.prototype.hasOwnProperty.call(alias, name)) return alias[name];
+    const n = norm(name);
+    for (const k of Object.keys(alias)) if (norm(k) === n) return alias[k];
+    return undefined;
+  }
+  // A built-in rule's category ("Dining & Takeout") -> the user's current name for it, or null if deleted.
+  function resolveCategory(name, list, alias) {
+    let cur = name;
+    for (let i = 0; i < 25 && cur; i++) {
+      const hit = findCat(list, cur);
+      if (hit) return hit;
+      const next = aliasLookup(alias, cur);
+      if (next === undefined || next === null || next === cur) return null;
+      cur = next;
+    }
+    return null;
+  }
+  // Rename or merge: every expense (and split part) in `from` moves to `to`. Pure; returns new objects.
+  function recategorize(txns, from, to) {
+    let changed = 0;
+    const out = (txns || []).map((t) => {
+      let hit = false;
+      const n = Object.assign({}, t);
+      if (n.category === from) { n.category = to; hit = true; }
+      if (Array.isArray(n.splits) && n.splits.some((x) => x.category === from)) {
+        n.splits = n.splits.map((x) => (x.category === from ? Object.assign({}, x, { category: to }) : x));
+        hit = true;
+      }
+      if (hit) changed++;
+      return hit ? n : t;
+    });
+    return { txns: out, changed };
+  }
+  function countCategory(txns, name) {
+    let n = 0;
+    for (const t of txns || []) if (t.category === name || (t.splits || []).some((x) => x.category === name)) n++;
+    return n;
+  }
+  // After renaming/deleting `from`, send anything that pointed at it (old names, built-in rules) to `to`; null means ask.
+  function redirectAlias(alias, from, to) {
+    const out = {};
+    for (const [k, v] of Object.entries(alias || {})) { const nv = v === from ? (to || null) : v; if (nv !== k) out[k] = nv; }
+    if (to !== from) out[from] = to || null;
+    return out;
+  }
+  function recategorizeMerchants(map, from, to) {
+    const out = {}; let changed = 0;
+    for (const [k, v] of Object.entries(map || {})) {
+      if (v && v.category === from) { changed++; if (to) out[k] = Object.assign({}, v, { category: to }); }
+      else out[k] = v;
+    }
+    return { map: out, changed };
+  }
+
+  // Picks a category from the user's list: description first, then the store, then name patterns.
+  function classify(merchantName, desc, idxEntry, o) {
+    const opt = o || {};
+    const cats = opt.cats || CATEGORIES, alias = opt.alias || {};
+    const res = (name) => resolveCategory(name, cats, alias);
+    const pick = (k) => (k ? (k.type && findCat(cats, k.type)) || res(k.category) : null);
+    const ok = (category, via) => ({ category, confident: true, via });
+    const d = desc ? findCat(cats, desc) : null;               // the description is one of your categories
+    if (d) return ok(d, "description");
+    const kw = desc ? keywordHit(desc) : null;                 // "supplements", "tide pens" beat the store
+    if (kw && kw.strong) { const c = pick(kw); if (c) return ok(c, "description"); }
+    if (!opt.isGroup) {
+      if (idxEntry && idxEntry.learned) { const c = res(idxEntry.category); if (c) return ok(c, "learned"); }
+      const m = findCat(cats, merchantName);                   // "Parking" when you have a Parking category
+      if (m) return ok(m, "name");
+      if (idxEntry && !idxEntry.learned) { const c = res(idxEntry.category); if (c) return ok(c, "known"); }
+    }
+    if (kw) { const c = pick(kw); if (c) return ok(c, "description"); }
+    if (!opt.isGroup) {
+      const nm = norm(merchantName);
+      for (const [re, cat] of NAME_PATTERNS) if (re.test(nm)) { const c = res(cat); if (c) return ok(c, "name"); }
+      const kwName = keywordHit(merchantName);
+      if (kwName && kwName.strong) { const c = pick(kwName); if (c) return ok(c, "name"); }
+    }
+    return { category: res("Miscellaneous") || cats[0] || "Miscellaneous", confident: false, via: "none" };
   }
 
   // Parse one line into expense draft(s). ctx: {date, merchantIndex, merchantGroups}
@@ -1121,41 +1210,34 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
 
     const merchantIsGroup = (ctx.merchantGroups || []).some((g) => norm(g) === norm(merchant));
     const mainDesc = stripQualifiers(desc);
-    const cls = classify(merchant, mainDesc || desc, idxEntry);
-    let category = cls.category, type = cls.type;
-    if (merchantIsGroup && !type) {
-      const kw = keywordHit(mainDesc || desc);
-      if (kw && kw.type) type = kw.type;
-    }
-    const confident = cls.confident && !(merchantIsGroup && !type && !splitInfo);
-    if (!cls.confident) res.issues.unshift("New merchant. Pick a category.");
-    else if (merchantIsGroup && !type && !splitInfo) res.issues.unshift(`What was this ${merchant} purchase? Pick a category.`);
+    const cats = ctx.categories || CATEGORIES, alias = ctx.catAlias || {};
+    const resolveRule = (k) => (k && k.strong ? (k.type && findCat(cats, k.type)) || resolveCategory(k.category, cats, alias) : null);
+    const cls = classify(merchant, mainDesc || desc, idxEntry, { cats, alias, isGroup: merchantIsGroup });
+    let category = cls.category;
+    let review = cls.confident ? "" : "category";
+    if (!cls.confident && !splitInfo) res.issues.unshift(merchantIsGroup ? `What was this ${merchant} purchase? Pick a category.` : idxEntry ? "Pick a category." : "New merchant. Pick a category.");
 
-    // Build splits
+    // Build splits: each part gets one category; what it was goes in the part's note
     let splits = [];
     if (splitInfo) {
       const mainKw = keywordHit(mainDesc);
-      const main = {
-        category: mainKw && mainKw.strong ? mainKw.category : category,
-        type: (mainKw && mainKw.type) || type || "",
-        note: mainDesc && !(mainKw && mainKw.type && norm(mainKw.type) === norm(mainDesc)) ? sentenceCase(mainDesc) : "",
-        amount_cents: splitInfo.remainder
-      };
-      const parts = splitInfo.splits.map((s) => {
-        const k = keywordHit(s.item);
-        const fallback = idxEntry ? idxEntry.category : category;
-        return { category: k && k.strong ? k.category : fallback, type: (k && k.type) || "", note: sentenceCase(s.item), amount_cents: s.cents };
+      const mainHit = (mainDesc && findCat(cats, mainDesc)) || resolveRule(mainKw);
+      const mainCat = mainHit || category;
+      const mainLabel = mainKw && mainKw.type ? mainKw.type : mainDesc ? sentenceCase(mainDesc) : "";
+      const main = { category: mainCat, type: "", note: mainLabel && norm(mainLabel) !== norm(mainCat) ? mainLabel : "", amount_cents: splitInfo.remainder };
+      const storeCat = !merchantIsGroup && idxEntry ? resolveCategory(idxEntry.category, cats, alias) || category : category;
+      const parts = splitInfo.splits.map((x) => {
+        const c = findCat(cats, x.item) || resolveRule(keywordHit(x.item)) || storeCat;
+        const note = sentenceCase(x.item);
+        return { category: c, type: "", note: norm(note) === norm(c) ? "" : note, amount_cents: x.cents };
       });
       splits = [main, ...parts];
-      if (main.note && main.type && norm(main.note) === norm(main.type)) main.note = "";
+      review = cls.confident || mainHit ? "" : "split";
       // Top-level category of the whole: the largest portion's category
-      const largest = splits.slice().sort((a, b) => b.amount_cents - a.amount_cents)[0];
-      category = largest.category;
-      type = largest.type;
+      category = splits.slice().sort((a, b) => b.amount_cents - a.amount_cents)[0].category;
       // Description reads as the parts: "Supplements and Tide pens" (brand capitals kept as typed)
-      const raw = splits.map((s) => s.note || s.type);
-      if (raw.every(Boolean)) desc = sentenceCase(raw.length > 1 ? raw.slice(0, -1).join(", ") + " and " + raw[raw.length - 1] : raw[0]);
-      else desc = sentenceCase(desc);
+      const raw = splits.map((x) => x.note || x.category);
+      desc = sentenceCase(raw.length > 1 ? raw.slice(0, -1).join(", ") + " and " + raw[raw.length - 1] : raw[0]);
     }
 
     const signed = negative ? -Math.abs(cents) : cents;
@@ -1165,12 +1247,12 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
         date, merchant, description, currency,
         original_cents: signed, // in original currency
         amount_cents: currency === "CAD" ? signed : null, // CAD filled after FX
-        category, type, splits: splits.map((s) => Object.assign({}, s)),
-        review: confident ? "" : "category",
+        category, type: "", splits: splits.map((x) => Object.assign({}, x)),
+        review,
         qty_index: qty > 1 ? i + 1 : 0, qty
       });
     }
-    res.confident = confident;
+    res.confident = !review;
     return res;
   }
 
@@ -1206,19 +1288,21 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
   function validTxn(t) { return isDate(t.date) && Number.isSafeInteger(t.amount_cents); }
   function cmpTxn(a, b) { return a.date < b.date ? -1 : a.date > b.date ? 1 : String(a.created_at || "").localeCompare(String(b.created_at || "")) || a.id.localeCompare(b.id); }
 
-  function validateTxn(t) {
+  function validateTxn(t, catList) {
+    const cats = catList === undefined ? CATEGORIES : catList;
+    const okCat = (c) => typeof c === "string" && c.trim() !== "" && (!cats || cats.includes(c));
     const errs = [];
     if (!isDate(t.date)) errs.push("Pick a valid date.");
     if (!Number.isSafeInteger(t.amount_cents)) errs.push("Enter an amount.");
     if (!String(t.merchant || "").trim()) errs.push("Enter a merchant.");
-    if (!CATEGORIES.includes(t.category)) errs.push("Pick a category.");
+    if (!okCat(t.category)) errs.push("Pick a category.");
     if (t.currency === "USD" && !Number.isSafeInteger(t.original_cents)) errs.push("Enter the US dollar amount.");
     if (t.splits && t.splits.length) {
       if (t.splits.length < 2) errs.push("A split needs at least two parts.");
       const sum = t.splits.reduce((a, s) => a + (Number.isSafeInteger(s.amount_cents) ? s.amount_cents : NaN), 0);
       if (!Number.isFinite(sum)) errs.push("Every split part needs an amount.");
       else if (sum !== t.amount_cents) errs.push(`Split parts add up to ${fmt(sum)}, not ${fmt(t.amount_cents)}.`);
-      for (const s of t.splits) if (!CATEGORIES.includes(s.category)) { errs.push("Every split part needs a category."); break; }
+      for (const s of t.splits) if (!okCat(s.category)) { errs.push("Every split part needs a category."); break; }
     }
     return errs;
   }
@@ -1313,13 +1397,15 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
   }
   // Every portion of every transaction lands in exactly one group, so groups always add up to the total.
   function groupTotals(txns, settings) {
+    const st = settings || {};
+    const noDetail = new Set(Array.from(NO_DETAIL).map((n) => resolveCategory(n, st.categories || CATEGORIES, st.cat_alias || {})).filter(Boolean));
     const groups = new Map();
     for (const t of txns) {
       const gm = isGroupMerchant(t.merchant, settings);
       for (const p of portions(t)) {
         let key, kind, item;
-        if (gm) { key = gm; kind = "merchant"; item = p.type || (p.note ? sentenceCase(p.note) : "") || (t.description ? sentenceCase(t.description) : "") || "Other"; }
-        else { key = p.category || "Miscellaneous"; kind = "category"; item = NO_DETAIL.has(key) ? null : t.merchant; }
+        if (gm) { key = gm; kind = "merchant"; item = p.category || "Other"; }
+        else { key = p.category || "Miscellaneous"; kind = "category"; item = noDetail.has(key) ? null : t.merchant; }
         let g = groups.get(key);
         if (!g) { g = { name: key, kind, cents: 0, count: 0, items: new Map() }; groups.set(key, g); }
         g.cents += p.cents; g.count += 1;
@@ -1429,12 +1515,12 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
     return /[",\n\r]/.test(s) || /^[=+\-@]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   }
   function toCSV(txns) {
-    const head = ["id", "date", "merchant", "description", "category", "type", "amount_cad", "currency", "original_amount", "fx_rate", "fx_rate_date", "fx_source", "splits", "notes", "needs_review", "source", "created_at", "updated_at"];
+    const head = ["id", "date", "merchant", "description", "category", "amount_cad", "currency", "original_amount", "fx_rate", "fx_rate_date", "fx_source", "splits", "notes", "needs_review", "source", "created_at", "updated_at"];
     const rows = [head.join(",")];
     for (const t of txns) {
       const fx = t.fx || {};
-      const splits = (t.splits || []).map((s) => `${s.category}${s.type ? " / " + s.type : ""}${s.note ? " (" + s.note + ")" : ""}: ${centsToDecimal(s.amount_cents)}`).join("; ");
-      rows.push([t.id, t.date, t.merchant, t.description || "", t.category, t.type || "", centsToDecimal(t.amount_cents), t.currency || "CAD",
+      const splits = (t.splits || []).map((s) => `${s.category}${s.note ? " (" + s.note + ")" : ""}: ${centsToDecimal(s.amount_cents)}`).join("; ");
+      rows.push([t.id, t.date, t.merchant, t.description || "", t.category, centsToDecimal(t.amount_cents), t.currency || "CAD",
         t.currency === "USD" ? centsToDecimal(t.original_cents) : centsToDecimal(t.amount_cents), fx.rate || "", fx.date || "", fx.source || "",
         splits, t.notes || "", t.review ? "yes" : "", t.source || "", t.created_at || "", t.updated_at || ""].map(csvCell).join(","));
     }
@@ -1455,7 +1541,8 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
     ymd, isDate, toUTC, fromUTC, addDays, diffDays, dayIndex, weekStart, weekEnd, monthKey, monthStart, monthEnd,
     daysInMonth, addMonths, localToday, isoWeek, eachDay, fmtDay, fmtDayLong, fmtMD, fmtRange, fmtMonth, fmtMonthShort,
     parseMoney, centsToDecimal, fmt, fmtCompact, rateToE4, e4ToRate, convertCents, impliedRate, pickRate,
-    norm, titleCase, sentenceCase, buildMerchantIndex, keywordHit, classify, findAmounts, parseSplits, parseLine, parseEntry,
+    norm, titleCase, sentenceCase, buildMerchantIndex, keywordHit, classify,
+    MAX_CAT_LEN, cleanCatName, sortCats, findCat, resolveCategory, recategorize, countCategory, redirectAlias, recategorizeMerchants, findAmounts, parseSplits, parseLine, parseEntry,
     mergeLedger, validateTxn, scaleSplits, portions, txnsIn, sumCents, weeklyBudget, weekSummary, allowance, budgetStatus,
     isGroupMerchant, groupTotals, topGroups, categoryTotals, merchantTotals, weekReport, monthReport, monthBenchmark,
     weeklySeries, monthlySeries, toCSV, newId
@@ -1502,21 +1589,17 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
     search: ic('<circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/>'),
     download: ic('<path d="M12 4v11M7.5 10.5L12 15l4.5-4.5M5 20h14"/>'),
     split: ic('<path d="M6 4v5a4 4 0 0 0 4 4h4a4 4 0 0 1 4 4v3M18 4v5a4 4 0 0 1-4 4"/>'),
-    cal: ic('<rect x="4" y="5" width="16" height="15" rx="2"/><path d="M4 10h16M9 3v4M15 3v4"/>')
+    cal: ic('<rect x="4" y="5" width="16" height="15" rx="2"/><path d="M4 10h16M9 3v4M15 3v4"/>'),
+    pencil: ic('<path d="M4 20h4L19 9l-4-4L4 16v4z"/><path d="M13.5 6.5l4 4"/>'),
+    trash: ic('<path d="M5 7h14M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/>')
   };
   const STATUS_LABEL = { ok: "On track", close: "Close to budget", over: "Over budget" };
   const STATUS_ICON = { ok: ICON.check, close: ICON.alert, over: ICON.over };
-  // Default top-level category for an item type (used when a mixed store like Amazon asks "what was it?")
-  const TYPE_CATEGORY = {
-    "Supplements": "Health & Medical", "Household supplies": "Shopping", "Personal care": "Personal Care", "Kitchen": "Shopping",
-    "Electronics": "Shopping", "Clothing": "Shopping", "Books & media": "Shopping", "Health": "Health & Medical", "Fitness gear": "Fitness",
-    "Groceries": "Groceries", "Gifts": "Gifts", "Pet": "Shopping", "Office": "Shopping", "Home": "Shopping", "Other": "Shopping"
-  };
 
   // ---------- State ----------
   const S = {
     mode: "loading", // loading | ready | nodb | private
-    txns: [], settings: E.DEFAULT_SETTINGS, learned: {}, mIndex: E.buildMerchantIndex({}),
+    txns: [], settings: normalizeSettings(null), learned: {}, mIndex: E.buildMerchantIndex({}),
     fx: {}, fxThrough: "", fxErr: null,
     loaded: { ledger: false, settings: false, merchants: false },
     today: E.localToday(),
@@ -1584,7 +1667,15 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
   function normalizeSettings(d) {
     const budgets = Array.isArray(d && d.budgets) ? d.budgets.filter((b) => b && E.isDate(b.from) && Number.isSafeInteger(b.weekly_cents) && b.weekly_cents > 0) : [];
     const groups = Array.isArray(d && d.merchant_groups) ? d.merchant_groups.filter((x) => typeof x === "string" && x.trim()) : E.DEFAULT_SETTINGS.merchant_groups.slice();
-    return { budgets: budgets.length ? budgets : E.DEFAULT_SETTINGS.budgets.slice(), merchant_groups: groups };
+    // Categories: the defaults until he edits them; then whatever list he keeps
+    const custom = Array.isArray(d && d.categories);
+    const categories = [];
+    for (const c of custom ? d.categories : E.CATEGORIES) {
+      const n = typeof c === "string" ? E.cleanCatName(c) : "";
+      if (n && !E.findCat(categories, n)) categories.push(n);
+    }
+    const alias = d && d.cat_alias && typeof d.cat_alias === "object" && !Array.isArray(d.cat_alias) ? d.cat_alias : {};
+    return { budgets: budgets.length ? budgets : E.DEFAULT_SETTINGS.budgets.slice(), merchant_groups: groups, categories: categories.length ? categories : E.CATEGORIES.slice(), cat_alias: alias, customCats: custom && categories.length > 0 };
   }
 
   // ---------- Writes ----------
@@ -1669,8 +1760,135 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
       await retry(() => ref.set({ map, updated_at: nowISO() }));
     });
   }
-  function saveSettings(next) {
-    return enqueue("meta:settings", () => retry(() => S.cap.db.doc("meta/settings").set(Object.assign({}, next, { updated_at: nowISO() }))));
+  // Pass only what changed. The category list is stored once he has edited it.
+  function saveSettings(patch) {
+    const next = Object.assign({}, S.settings, patch || {});
+    const doc = { budgets: next.budgets, merchant_groups: next.merchant_groups, updated_at: nowISO() };
+    if ((patch && patch.categories) || S.settings.customCats) { doc.categories = next.categories; doc.cat_alias = next.cat_alias || {}; }
+    S.settings = normalizeSettings(doc); // the next step sees the change right away
+    return enqueue("meta:settings", () => retry(() => S.cap.db.doc("meta/settings").set(doc))).catch(async (e) => {
+      try { const s = await S.cap.db.doc("meta/settings").get(); S.settings = normalizeSettings(s.exists ? s.data() : null); } catch (e2) { /* keep */ }
+      scheduleRender();
+      throw e;
+    });
+  }
+
+  // ---------- Categories ----------
+  // His list, plus any category an expense still uses (so nothing disappears from pickers or filters)
+  let catMemo = { txns: null, settings: null, list: [] };
+  function cats() {
+    if (catMemo.txns === S.txns && catMemo.settings === S.settings) return catMemo.list;
+    const out = S.settings.categories.slice();
+    const add = (c) => { if (typeof c === "string" && c.trim() && !E.findCat(out, c)) out.push(c); };
+    for (const t of S.txns) { add(t.category); for (const x of t.splits || []) add(x.category); }
+    catMemo = { txns: S.txns, settings: S.settings, list: E.sortCats(out) };
+    return catMemo.list;
+  }
+  function catOptions(selected, o) {
+    const list = cats().slice();
+    if (selected && !list.includes(selected)) list.push(selected);
+    return list.map((c) => `<option value="${esc(c)}" ${c === selected ? "selected" : ""}>${esc(c)}</option>`).join("") + (o && o.noNew ? "" : `<option value="__new__">+ New category…</option>`);
+  }
+  function catNameError(name) {
+    if (!name) return "Type a name for the category.";
+    if (!E.norm(name)) return "Use at least one letter or number.";
+    if (name.length > E.MAX_CAT_LEN) return `Keep the name under ${E.MAX_CAT_LEN} characters.`;
+    if (name === "__new__") return "Pick a different name.";
+    return "";
+  }
+  async function addCategory(raw) {
+    const name = E.cleanCatName(raw);
+    const bad = catNameError(name);
+    if (bad) return { error: bad };
+    const listed = E.findCat(S.settings.categories, name);
+    if (listed) return { name: listed, existed: true };
+    const finalName = E.findCat(cats(), name) || name;
+    await saveSettings({ categories: S.settings.categories.concat([finalName]), cat_alias: S.settings.cat_alias });
+    return { name: finalName };
+  }
+  // Moves every expense (and split part) in `from` to `to`, and stores he taught `from`. Remembers what it changed for undo.
+  async function rewriteCategory(from, to) {
+    const months = new Set();
+    for (const t of S.txns) if (t.category === from || (t.splits || []).some((x) => x.category === from)) months.add(E.monthKey(t.date));
+    if (months.size && !to) throw { code: "invalid_argument", message: "no target" };
+    const before = new Map();
+    const now = nowISO();
+    let changed = 0;
+    for (const mk of months) {
+      await mutateMonth(mk, (cur) => {
+        const r = E.recategorize(cur, from, to);
+        changed += r.changed;
+        return r.txns.map((t, i) => {
+          if (t === cur[i]) return t;
+          before.set(t.id, { category: cur[i].category, splits: cur[i].splits || [] });
+          return Object.assign({}, t, { updated_at: now });
+        });
+      });
+    }
+    const merchantsBefore = {};
+    await enqueue("meta:merchants", async () => {
+      const ref = S.cap.db.doc("meta/merchants");
+      const snap = await retry(() => ref.get());
+      const map = (snap.exists && snap.data().map) || {};
+      for (const [k, v] of Object.entries(map)) if (v && v.category === from) merchantsBefore[k] = v;
+      const r = E.recategorizeMerchants(map, from, to);
+      if (r.changed) await retry(() => ref.set({ map: r.map, updated_at: nowISO() }));
+    });
+    if (S.tx.cat === from) S.tx.cat = to || "";
+    return { changed, before, months, merchantsBefore };
+  }
+  async function renameCategory(from, raw) {
+    const to = E.cleanCatName(raw);
+    const bad = catNameError(to);
+    if (bad) return { error: bad };
+    if (to === from) return { same: true };
+    const clash = E.findCat(cats(), to);
+    if (clash && clash !== from) return { error: `You already have ${clash}. To combine them, delete ${from} and move its expenses to ${clash}.` };
+    const r = await rewriteCategory(from, to);
+    const list = S.settings.categories.filter((c) => c !== from);
+    if (!list.includes(to)) list.push(to);
+    await saveSettings({ categories: list, cat_alias: E.redirectAlias(S.settings.cat_alias, from, to) });
+    return { name: to, changed: r.changed };
+  }
+  async function deleteCategory(name, moveTo) {
+    const used = E.countCategory(S.txns, name);
+    if (cats().length <= 1) return { error: "You need at least one category." };
+    if (used && (!moveTo || moveTo === name)) return { error: "Pick a category for its expenses." };
+    const target = used ? moveTo : null;
+    const prevAlias = Object.assign({}, S.settings.cat_alias || {});
+    const r = await rewriteCategory(name, target);
+    await saveSettings({ categories: S.settings.categories.filter((c) => c !== name), cat_alias: E.redirectAlias(S.settings.cat_alias, name, target) });
+    return { changed: r.changed, undo: { name, moveTo: target, before: r.before, months: r.months, merchantsBefore: r.merchantsBefore, prevAlias } };
+  }
+  // Puts a deleted category back and returns its expenses, skipping any edited since.
+  async function undoDeleteCategory(u) {
+    const list = S.settings.categories.slice();
+    if (!E.findCat(list, u.name)) list.push(u.name);
+    const alias = Object.assign({}, S.settings.cat_alias || {});
+    for (const [k, v] of Object.entries(u.prevAlias)) alias[k] = v;
+    if (!Object.prototype.hasOwnProperty.call(u.prevAlias, u.name)) delete alias[u.name];
+    await saveSettings({ categories: list, cat_alias: alias });
+    let back = 0;
+    for (const mk of u.months) {
+      await mutateMonth(mk, (cur) => cur.map((t) => {
+        const b = u.before.get(t.id);
+        if (!b) return t;
+        const expect = E.recategorize([{ category: b.category, splits: b.splits }], u.name, u.moveTo).txns[0];
+        if (JSON.stringify([t.category, t.splits || []]) !== JSON.stringify([expect.category, expect.splits || []])) return t;
+        back++;
+        return Object.assign({}, t, { category: b.category, splits: b.splits, updated_at: nowISO() });
+      }));
+    }
+    if (Object.keys(u.merchantsBefore).length) {
+      await enqueue("meta:merchants", async () => {
+        const ref = S.cap.db.doc("meta/merchants");
+        const snap = await retry(() => ref.get());
+        const map = Object.assign({}, (snap.exists && snap.data().map) || {});
+        for (const [k, v] of Object.entries(u.merchantsBefore)) if (!map[k] || map[k].category === u.moveTo) map[k] = v;
+        await retry(() => ref.set({ map, updated_at: nowISO() }));
+      });
+    }
+    return back;
   }
   function writeError(e) {
     const c = e && e.code;
@@ -1933,7 +2151,7 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
     const parts = [];
     if (t.description) parts.push(esc(t.description));
     if (t.splits && t.splits.length) parts.push(`split ${t.splits.length} ways`);
-    else parts.push(esc(t.type && E.isGroupMerchant(t.merchant, S.settings) ? t.type : t.category));
+    else parts.push(esc(t.category));
     return parts.join(" · ");
   }
   function txRow(t, opts) {
@@ -1985,7 +2203,7 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
       return `<section class="dgroup"><div class="dgroup-head"><span>${esc(E.fmtDayLong(d))}</span><span class="num">${fmt(dt)}</span></div><ul class="receipt">${ts.map((t) => txRow(t, S.tx.cat ? { cents: catCents(t, S.tx.cat) } : undefined)).join("")}</ul></section>`;
     }).join("");
     const periodOpts = PERIODS.map(([k, l]) => `<option value="${k}" ${S.tx.period === k ? "selected" : ""}>${l}</option>`).join("");
-    const catOpts = `<option value="">All categories</option>` + E.CATEGORIES.map((c) => `<option ${S.tx.cat === c ? "selected" : ""}>${esc(c)}</option>`).join("");
+    const catOpts = `<option value="">All categories</option>` + cats().map((c) => `<option value="${esc(c)}" ${S.tx.cat === c ? "selected" : ""}>${esc(c)}</option>`).join("");
     return `<h1 class="view-title">Transactions</h1>
       <div class="toolbar">
         <label class="search"><span class="sr">Search</span>${ICON.search}<input class="input" id="tx-q" type="search" placeholder="Search merchants, notes, amounts" value="${esc(S.tx.q)}" data-input="tx-q" autocomplete="off"></label>
@@ -2358,7 +2576,7 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
     let items = [];
 
     function build() {
-      const parsed = E.parseEntry(st.text, { date: st.date, merchantIndex: S.mIndex, merchantGroups: S.settings.merchant_groups });
+      const parsed = E.parseEntry(st.text, { date: st.date, merchantIndex: S.mIndex, merchantGroups: S.settings.merchant_groups, categories: cats(), catAlias: S.settings.cat_alias });
       const out = [];
       parsed.forEach((r) => {
         if (r.error) { out.push({ line: r.line, error: r.error }); return; }
@@ -2366,7 +2584,6 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
           const ov = st.overrides[r.line] || {};
           const x = Object.assign({}, it, { line: r.line, issues: r.issues.slice() });
           if (ov.category) { x.category = ov.category; x.review = ""; x.picked = true; }
-          if (ov.type !== undefined) { x.type = ov.type; if (!ov.category) x.category = TYPE_CATEGORY[ov.type] || x.category; x.review = ""; x.picked = true; }
           if (x.currency === "USD") {
             const f = st.fx[x.date];
             const manual = st.cad[r.line + "|" + x.date];
@@ -2399,11 +2616,9 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
       items = build();
       needRates();
       const pv = $("#add-preview", sh.body);
-      const catSel = (it) => `<option value="" disabled ${it.review === "category" ? "selected" : ""}>Pick a category</option>` + E.CATEGORIES.map((c) => `<option ${it.review !== "category" && it.category === c ? "selected" : ""}>${esc(c)}</option>`).join("");
-      const typeSel = (it) => `<option value="" ${!it.type ? "selected" : ""} disabled>What was it?</option>` + E.TYPES.map((t) => `<option ${it.type === t ? "selected" : ""}>${esc(t)}</option>`).join("");
+      const catSel = (it) => `<option value="" disabled ${it.review === "category" ? "selected" : ""}>Pick a category</option>` + catOptions(it.review === "category" ? null : it.category);
       pv.innerHTML = items.map((it, i) => {
         if (it.error) return `<li class="pv-item bad"><div class="pv-top"><span class="pv-name">${esc(it.line)}</span></div><span class="err">${esc(it.error)}. Start the line with the amount, like 25.99 chipotle.</span></li>`;
-        const isGroup = !!E.isGroupMerchant(it.merchant, S.settings);
         const f = it.currency === "USD" ? st.fx[it.date] : null;
         let amt;
         if (it.currency === "USD") {
@@ -2411,26 +2626,28 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
           else if (f && f.status === "loading") amt = `<small>Getting rate…</small>${usd(it.original_cents)}`;
           else amt = `${usd(it.original_cents)}<small>Enter CAD below</small>`;
         } else amt = fmt(it.amount_cents);
-        const flagged = it.review === "category" || (isGroup && !it.type && !it.splits.length);
-        const ask = isGroup && !it.splits.length
-          ? `<label class="chip-select ${flagged ? "ask" : ""}"><span>${esc(it.type || "What was it?")}</span><select data-i="${i}" data-k="type" aria-label="Item type">${typeSel(it)}</select></label>`
-          : "";
+        const flagged = it.review === "category";
         const cat = it.splits.length ? `<span class="chip">${ICON.split.replace('class="i"', 'class="i" style="width:14px;height:14px;margin-right:4px"')}Split</span>`
-          : `<label class="chip-select ${it.review === "category" && !isGroup ? "ask" : ""}"><span>${esc(it.review === "category" ? "Pick a category" : it.category)}</span><select data-i="${i}" data-k="category" aria-label="Category">${catSel(it)}</select></label>`;
-        const splits = it.splits.length ? `<div class="pv-splits">${it.splits.map((s) => `<div><span>${esc(s.type || s.category)}${s.note && s.note !== s.type ? " · " + esc(s.note) : ""}</span><span class="num">${it.currency === "USD" && it.amount_cents === null ? usd(s.amount_cents) : fmt(s.amount_cents)}</span></div>`).join("")}</div>` : "";
+          : `<label class="chip-select ${flagged ? "ask" : ""}"><span>${esc(flagged ? "Pick a category" : it.category)}</span><select data-i="${i}" data-k="category" aria-label="Category">${catSel(it)}</select></label>`;
+        const splits = it.splits.length ? `<div class="pv-splits">${it.splits.map((s) => `<div><span>${esc(s.category)}${s.note ? " · " + esc(s.note) : ""}</span><span class="num">${it.currency === "USD" && it.amount_cents === null ? usd(s.amount_cents) : fmt(s.amount_cents)}</span></div>`).join("")}</div>` : "";
         const dateNote = it.date !== st.date ? ` · ${esc(E.fmtDay(it.date))}` : "";
         const issues = it.issues.filter((x) => !/Pick a category|What was this/.test(x));
         const cadInput = it.currency === "USD" && (it.amount_cents === null || (f && f.estimate) || st.cad[it.line + "|" + it.date] !== undefined)
           ? `<label class="field"><span>CAD charged${f && f.error ? ` (${esc(f.error)})` : ""}</span><input class="input" inputmode="decimal" data-i="${i}" data-k="cad" placeholder="${it.amount_cents !== null ? E.centsToDecimal(it.amount_cents) : "0.00"}" value="${st.cad[it.line + "|" + it.date] !== undefined ? E.centsToDecimal(st.cad[it.line + "|" + it.date]) : ""}"></label>` : "";
         return `<li class="pv-item ${flagged ? "flagged" : ""}"><div class="pv-top"><span class="pv-name">${esc(it.merchant)}${it.description ? `<small>${esc(it.description)}</small>` : ""}${it.qty > 1 ? `<small>${it.qty_index} of ${it.qty}</small>` : ""}</span><span class="pv-amt">${amt}</span></div>
-          <div class="pv-meta">${ask}${cat}${dateNote ? `<span class="chip">${dateNote.slice(3)}</span>` : ""}${it.currency === "USD" && it.fx && it.fx.provisional ? `<span class="chip" data-tip="Today's Bank of Canada rate is published around 4:30 PM ET. You can recalculate it later from the expense.">Provisional rate</span>` : ""}</div>
+          <div class="pv-meta">${cat}${dateNote ? `<span class="chip">${dateNote.slice(3)}</span>` : ""}${it.currency === "USD" && it.fx && it.fx.provisional ? `<span class="chip" data-tip="Today's Bank of Canada rate is published around 4:30 PM ET. You can recalculate it later from the expense.">Provisional rate</span>` : ""}</div>
           ${splits}${issues.map((x) => `<span class="flag">${esc(x)}</span>`).join("")}${cadInput}</li>`;
       }).join("");
       $$("select[data-i]", pv).forEach((s) => {
         s.onchange = () => {
           const it = items[Number(s.dataset.i)];
           const ov = st.overrides[it.line] = st.overrides[it.line] || {};
-          if (s.dataset.k === "category") ov.category = s.value; else ov.type = s.value;
+          if (s.value === "__new__") {
+            refresh();
+            openNewCategory({ onCreate: (name) => { ov.category = name; refresh(); } });
+            return;
+          }
+          ov.category = s.value;
           refresh();
         };
       });
@@ -2445,7 +2662,7 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
       const good = items.filter((x) => !x.error);
       const blocked = good.some((x) => x.amount_cents === null);
       const total = good.reduce((s, x) => s + (x.amount_cents || 0), 0);
-      const needCat = good.filter((x) => x.review === "category" || (E.isGroupMerchant(x.merchant, S.settings) && !x.type && !x.splits.length)).length;
+      const needCat = good.filter((x) => x.review === "category").length;
       $("#add-total", sh.foot).innerHTML = good.length ? `<strong>${fmt(total)}</strong>${plural(good.length, "expense")}${needCat ? ` · ${needCat} unsorted` : ""}${items.some((x) => x.error) ? " · some lines skipped" : ""}` : `<span class="muted">Type an expense to start</span>`;
       const btn = $("#add-save", sh.foot);
       btn.disabled = !good.length || blocked || st.saving;
@@ -2457,16 +2674,14 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
       st.saving = true; refresh();
       const now = nowISO();
       const txns = good.map((x, i) => {
-        const isGroup = !!E.isGroupMerchant(x.merchant, S.settings);
         let review = x.review || "";
-        if (isGroup && !x.type && !x.splits.length) review = "category";
         if (!review && x.issues.some((m) => /another amount/.test(m))) review = "split";
         return {
           id: E.newId(x.date), date: x.date, merchant: x.merchant, description: x.description || "",
           amount_cents: x.amount_cents, currency: x.currency,
           original_cents: x.currency === "USD" ? x.original_cents : x.amount_cents,
           fx: x.currency === "USD" ? x.fx : null,
-          category: x.category, type: x.type || "", splits: x.splits.map((s) => ({ category: s.category, type: s.type || "", note: s.note || "", amount_cents: s.amount_cents })),
+          category: x.category, type: "", splits: x.splits.map((s) => ({ category: s.category, type: "", note: s.note || "", amount_cents: s.amount_cents })),
           notes: "", review, source: "app", created_at: new Date(Date.parse(now) + i).toISOString(), updated_at: now, rev: 1
         };
       });
@@ -2479,9 +2694,10 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
         const t = txns[i];
         if (t.review || t.splits.length || E.isGroupMerchant(t.merchant, S.settings)) return;
         const known = S.mIndex.get(E.norm(t.merchant));
-        if (!x.picked && known && known.category === t.category) return;
+        const knownCat = known ? E.resolveCategory(known.category, cats(), S.settings.cat_alias) : null;
+        if (!x.picked && knownCat === t.category) return;
         if (!x.picked && x.issues.length) return;
-        learn[E.norm(t.merchant)] = { name: t.merchant, category: t.category, type: t.type };
+        learn[E.norm(t.merchant)] = { name: t.merchant, category: t.category };
       });
       learnMerchants(learn).catch(() => {});
       st.text = ""; store("draft", "");
@@ -2500,7 +2716,7 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
     const t = clone(orig);
     const st = { splits: (t.splits || []).map((s) => Object.assign({}, s, { amt: E.centsToDecimal(s.amount_cents) })), confirmDelete: false, saving: false, fxNew: null, histOpen: false };
     const sh = openSheet({ title: `${t.merchant} · ${fmt(t.amount_cents)}`, noAutoFocus: true });
-    const catOpts = (v) => E.CATEGORIES.map((c) => `<option ${c === v ? "selected" : ""}>${esc(c)}</option>`).join("");
+    const catOpts = (v) => catOptions(v);
     const merchantNames = Array.from(new Set(Array.from(S.mIndex.values()).map((m) => m.name))).sort();
     sh.body.innerHTML = `
       ${t.review ? `<span class="flag">${t.review === "fx" ? "The exchange rate was estimated. Check the CAD amount." : t.review === "split" ? "There was a second amount in the line. Split it if needed." : "Pick a category for this expense."} Saving marks it as checked.</span>` : ""}
@@ -2571,12 +2787,14 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
       const block = $("#ed-catblock", sh.body);
       if (st.splits.length) { block.innerHTML = ""; return; }
       const known = S.mIndex.get(E.norm(mer.value));
-      const changedFromKnown = !isGroup && (!known || known.category !== st.category);
-      block.innerHTML = `<div class="grid2"><label class="field"><span>Category</span><select class="select" id="ed-cat">${catOpts(st.category)}</select></label>
-        <label class="field"><span>Item type${isGroup ? "" : " (optional)"}</span><input class="input" id="ed-type" list="ed-tlist" value="${esc(st.type)}" autocomplete="off"><datalist id="ed-tlist">${E.TYPES.map((x) => `<option value="${esc(x)}"></option>`).join("")}</datalist></label></div>
+      const knownCat = known ? E.resolveCategory(known.category, cats(), S.settings.cat_alias) : null;
+      const changedFromKnown = !isGroup && knownCat !== st.category;
+      block.innerHTML = `<label class="field"><span>Category</span><select class="select" id="ed-cat">${catOpts(st.category)}</select></label>
         ${changedFromKnown && mer.value.trim() ? `<label class="toggle" style="margin-top:8px"><input type="checkbox" id="ed-remember" ${st.remember ? "checked" : ""}>Use ${esc(st.category)} for ${esc(mer.value.trim())} from now on</label>` : ""}`;
-      $("#ed-cat", sh.body).onchange = (e) => { st.category = e.target.value; drawCat(); };
-      $("#ed-type", sh.body).oninput = (e) => { st.type = e.target.value; };
+      $("#ed-cat", sh.body).onchange = (e) => {
+        if (e.target.value === "__new__") { drawCat(); openNewCategory({ onCreate: (name) => { st.category = name; drawCat(); } }); return; }
+        st.category = e.target.value; drawCat();
+      };
       const rem = $("#ed-remember", sh.body); if (rem) rem.onchange = (e) => { st.remember = e.target.checked; };
     }
     function drawSplitStatus() {
@@ -2600,18 +2818,21 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
         <div class="split-row"><select class="select" data-s="${i}" data-f="category" aria-label="Part category">${catOpts(s.category)}</select>
           <input class="input num" data-s="${i}" data-f="amt" inputmode="decimal" value="${esc(s.amt)}" aria-label="Part amount">
           <button class="icon-btn" data-s="${i}" data-f="del" aria-label="Remove part">${ICON.x}</button>
-          <div class="two"><input class="input" data-s="${i}" data-f="type" list="ed-tlist2" placeholder="Item type" value="${esc(s.type || "")}" aria-label="Part item type"><input class="input" data-s="${i}" data-f="note" placeholder="Note" value="${esc(s.note || "")}" aria-label="Part note"></div></div>`).join("")}</div>
-        <datalist id="ed-tlist2">${E.TYPES.map((x) => `<option value="${esc(x)}"></option>`).join("")}</datalist>
+          <input class="input full" data-s="${i}" data-f="note" placeholder="Note, e.g. Tide pens" value="${esc(s.note || "")}" aria-label="Part note"></div>`).join("")}</div>
         <div class="row" style="margin-top:10px"><button class="btn sm" data-f="addpart">${ICON.plus}Add part</button><span class="grow"></span><span id="ed-split-status"></span></div>`;
       $$("[data-s]", box).forEach((el) => {
         const i = Number(el.dataset.s), f = el.dataset.f;
         if (f === "del") el.onclick = () => { st.splits.splice(i, 1); if (st.splits.length === 1) st.splits = []; drawSplits(); };
+        else if (f === "category") el.onchange = () => {
+          if (el.value === "__new__") { el.value = st.splits[i].category; openNewCategory({ onCreate: (name) => { st.splits[i].category = name; drawSplits(); } }); return; }
+          st.splits[i].category = el.value;
+        };
         else el.oninput = el.onchange = () => { st.splits[i][f] = el.value; if (f === "amt") drawSplitStatus(); };
       });
       $("[data-f=addpart]", box).onclick = () => {
         const total = cadAmount() || 0;
         const sum = st.splits.reduce((a, s) => a + (E.parseMoney(s.amt) || 0), 0);
-        st.splits.push({ category: st.category || "Miscellaneous", type: "", note: "", amt: E.centsToDecimal(Math.max(0, total - sum)) });
+        st.splits.push({ category: st.category || cats()[0], type: "", note: "", amt: E.centsToDecimal(Math.max(0, total - sum)) });
         drawSplits();
       };
       drawSplitStatus();
@@ -2703,7 +2924,7 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
         const largest = next.splits.slice().sort((x, y) => (y.amount_cents || 0) - (x.amount_cents || 0))[0];
         next.category = largest.category; next.type = largest.type;
       } else next.splits = [];
-      const errs = E.validateTxn(next);
+      const errs = E.validateTxn(next, cats());
       if (errs.length) { err.textContent = errs[0]; return; }
       const same = JSON.stringify(Object.assign({}, orig, { rev: 0, updated_at: "" })) === JSON.stringify(Object.assign({}, next, { rev: 0, updated_at: "", review: orig.review }));
       if (same && !orig.review) { sh.close(); return; }
@@ -2712,7 +2933,8 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
         await updateTxn(orig, next);
         const rem = !next.splits.length && st.remember && !E.isGroupMerchant(next.merchant, S.settings);
         const known = S.mIndex.get(E.norm(next.merchant));
-        if (rem && (!known || known.category !== next.category)) await learnMerchants({ [E.norm(next.merchant)]: { name: next.merchant, category: next.category, type: next.type } });
+        const knownCat = known ? E.resolveCategory(known.category, cats(), S.settings.cat_alias) : null;
+        if (rem && knownCat !== next.category) await learnMerchants({ [E.norm(next.merchant)]: { name: next.merchant, category: next.category } });
         toast("Saved");
       } catch (e) { toast(writeError(e)); }
     }
@@ -2721,8 +2943,8 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
   }
   const DIFF_FIELDS = [
     ["date", "Date", (v) => (E.isDate(v) ? E.fmtDay(v) : v)], ["merchant", "Merchant"], ["description", "Description"], ["amount_cents", "Amount", (v) => fmt(v)],
-    ["currency", "Currency"], ["category", "Category"], ["type", "Item type"], ["notes", "Notes"],
-    ["splits", "Split", (v) => (v && v.length ? v.map((s) => `${s.type || s.category} ${fmt(s.amount_cents)}`).join(", ") : "none")],
+    ["currency", "Currency"], ["category", "Category"], ["notes", "Notes"],
+    ["splits", "Split", (v) => (v && v.length ? v.map((s) => `${s.category} ${fmt(s.amount_cents)}`).join(", ") : "none")],
     ["fx", "Rate", (v) => (v ? `${v.rate} (${v.source})` : "none")]
   ];
   function diffList(a, b) {
@@ -2751,9 +2973,14 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
           <div class="row"><span class="note grow">Earlier weeks keep the budget they had.</span><button class="btn sm" id="st-budget-save">Save budget</button></div>
           ${budgets.length > 1 ? `<details class="tbl"><summary>Budget history</summary><table class="t"><tbody>${budgets.map((b) => `<tr><td>From ${b.from === "2000-01-03" ? "the start" : esc(E.fmtDay(b.from))}</td><td class="r">${fmt(b.weekly_cents)}</td></tr>`).join("")}</tbody></table></details>` : ""}
         </div>
+        <div class="section-title">Categories</div>
+        <div class="card" style="display:grid;gap:10px">
+          <p class="note" style="margin:0">Add, rename or delete the categories you pick from. You can also add one while logging an expense.</p>
+          <button class="btn block" id="st-cats">${ICON.pencil}Edit categories (${cats().length})</button>
+        </div>
         <div class="section-title">Stores reported by what you bought</div>
         <div class="card" style="display:grid;gap:10px">
-          <p class="note" style="margin:0">These stores get their own group in reports, broken down by item type (Supplements, Household supplies…). Everything else is grouped by category.</p>
+          <p class="note" style="margin:0">These stores get their own group in reports, broken down by category. Use it for stores that sell many different things, like Amazon.</p>
           <div class="row wrap">${S.settings.merchant_groups.map((g, i) => `<span class="chip" style="height:30px;padding-right:2px">${esc(g)}<button class="icon-btn" style="width:26px;height:26px" data-g="${i}" aria-label="Remove ${esc(g)}">${ICON.x}</button></span>`).join("") || `<span class="note">None</span>`}</div>
           <div class="row"><input class="input" id="st-group" placeholder="Add a store, e.g. Costco"><button class="btn sm" id="st-group-add">Add</button></div>
         </div>
@@ -2779,19 +3006,20 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
         if (c === null || c <= 0) { toast("Enter a weekly budget like 1050."); return; }
         const from = $("#st-from", sh.body).value;
         const list = S.settings.budgets.filter((b) => b.from !== from).concat([{ from, weekly_cents: c }]);
-        try { await saveSettings(Object.assign({}, S.settings, { budgets: list })); toast(`Budget set to ${fmt(c)} from ${E.fmtMD(from)}`); } catch (e) { toast(writeError(e)); }
+        try { await saveSettings({ budgets: list }); toast(`Budget set to ${fmt(c)} from ${E.fmtMD(from)}`); } catch (e) { toast(writeError(e)); }
         setTimeout(draw, 300);
       };
-      $$("[data-g]", sh.body).forEach((b) => { b.onclick = async () => { const groups = S.settings.merchant_groups.filter((_, i) => i !== Number(b.dataset.g)); try { await saveSettings(Object.assign({}, S.settings, { merchant_groups: groups })); } catch (e) { toast(writeError(e)); } setTimeout(draw, 300); }; });
+      $$("[data-g]", sh.body).forEach((b) => { b.onclick = async () => { const groups = S.settings.merchant_groups.filter((_, i) => i !== Number(b.dataset.g)); try { await saveSettings({ merchant_groups: groups }); } catch (e) { toast(writeError(e)); } setTimeout(draw, 300); }; });
       $("#st-group-add", sh.body).onclick = async () => {
         const v = $("#st-group", sh.body).value.trim();
         if (!v) return;
         const known = S.mIndex.get(E.norm(v));
         const name = known ? known.name : E.titleCase(v);
         if (S.settings.merchant_groups.some((g) => E.norm(g) === E.norm(name))) return;
-        try { await saveSettings(Object.assign({}, S.settings, { merchant_groups: S.settings.merchant_groups.concat([name]) })); } catch (e) { toast(writeError(e)); }
+        try { await saveSettings({ merchant_groups: S.settings.merchant_groups.concat([name]) }); } catch (e) { toast(writeError(e)); }
         setTimeout(draw, 300);
       };
+      $("#st-cats", sh.body).onclick = () => openCategories({ onClose: draw });
       $("#st-merchants", sh.body).onclick = openMerchants;
       $("#st-deleted", sh.body).onclick = openDeleted;
       $("#st-csv", sh.body).onclick = () => exportCSV(S.txns, "all");
@@ -2821,10 +3049,10 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
       const entries = Object.entries(S.learned).map(([k, v]) => Object.assign({ key: k }, v)).filter((m) => !q || E.norm(m.name).includes(E.norm(q))).sort((a, b) => (b.n || 0) - (a.n || 0) || a.name.localeCompare(b.name));
       const list = $("[data-x=list]", sh.body);
       list.innerHTML = entries.length ? entries.map((m) => `<div class="listrow" style="cursor:default"><span class="lr-main"><span class="lr-title">${esc(m.name)}</span><br><span class="lr-sub">${plural(m.n || 0, "use")}</span></span>
-        <select class="select" style="max-width:190px" data-k="${esc(m.key)}" aria-label="Category for ${esc(m.name)}">${E.CATEGORIES.map((c) => `<option ${c === m.category ? "selected" : ""}>${esc(c)}</option>`).join("")}</select>
+        <select class="select" style="max-width:190px" data-k="${esc(m.key)}" aria-label="Category for ${esc(m.name)}">${catOptions(m.category, { noNew: true })}</select>
         <button class="icon-btn" data-del="${esc(m.key)}" aria-label="Forget ${esc(m.name)}">${ICON.x}</button></div>`).join("")
         : `<p class="note">${q ? "No match." : "Merchants you add are remembered here with their category. New ones appear after you save expenses."}</p>`;
-      $$("select[data-k]", list).forEach((s) => { s.onchange = async () => { const m = S.learned[s.dataset.k]; try { await learnMerchants({ [s.dataset.k]: { name: m.name, category: s.value, type: m.type || "", bump: false } }); toast(`${m.name} → ${s.value}`); } catch (e) { toast(writeError(e)); } }; });
+      $$("select[data-k]", list).forEach((s) => { s.onchange = async () => { const m = S.learned[s.dataset.k]; try { await learnMerchants({ [s.dataset.k]: { name: m.name, category: s.value, bump: false } }); toast(`${m.name} → ${s.value}`); } catch (e) { toast(writeError(e)); } }; });
       $$("[data-del]", list).forEach((b) => { b.onclick = async () => { try { await learnMerchants({ [b.dataset.del]: null }); setTimeout(draw, 300); } catch (e) { toast(writeError(e)); } }; });
     };
     sh.body.innerHTML = `<p class="note" style="margin:0">Changing a category here affects new expenses only. Built-in merchants (Chipotle, Esso, Loblaws…) work without being listed.</p><label class="search"><span class="sr">Search merchants</span>${ICON.search}<input class="input" placeholder="Search merchants" data-x="q"></label><div data-x="list"></div>`;
@@ -2867,7 +3095,8 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
   }
   function exportCSV(list, label) { saveFile(`spend-tracker-${label}-${S.today}.csv`, E.toCSV(list)); }
   async function exportBackup() {
-    const data = JSON.stringify({ app: "Spend Tracker", version: 1, exported_at: nowISO(), settings: S.settings, merchants: S.learned, transactions: S.txns }, null, 2);
+    const settings = { budgets: S.settings.budgets, merchant_groups: S.settings.merchant_groups, categories: S.settings.categories, cat_alias: S.settings.cat_alias };
+    const data = JSON.stringify({ app: "Spend Tracker", version: 2, exported_at: nowISO(), settings, merchants: S.learned, transactions: S.txns }, null, 2);
     const ok = await saveFile(`spend-tracker-backup-${S.today}.json`, data);
     if (ok) {
       try { await S.cap.db.doc("meta/backup").set({ last: nowISO(), count: S.txns.length }); } catch (e) { /* not critical */ }
@@ -2880,30 +3109,155 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
     try { data = JSON.parse(await file.text()); } catch (e) { return { error: "That file isn't a Spend Tracker backup." }; }
     if (!data || !Array.isArray(data.transactions)) return { error: "That file isn't a Spend Tracker backup." };
     const have = new Set(S.txns.map((t) => t.id));
-    const valid = data.transactions.filter((t) => t && typeof t.id === "string" && /^[A-Za-z0-9_.:-]{1,80}$/.test(t.id) && !E.validateTxn(t).length);
+    const valid = data.transactions.filter((t) => t && typeof t.id === "string" && /^[A-Za-z0-9_.:-]{1,80}$/.test(t.id) && !E.validateTxn(t, null).length);
     const fresh = valid.filter((t) => !have.has(t.id));
     return { data, fresh, already: valid.length - fresh.length, invalid: data.transactions.length - valid.length };
   }
   async function applyBackup(r) {
-    await addTxns(r.fresh.map((t) => Object.assign({}, t, { source: t.source || "backup" })));
-    const s = r.data.settings;
-    if (s && Array.isArray(s.budgets)) {
-      const budgets = S.settings.budgets.slice();
-      for (const b of s.budgets) if (b && E.isDate(b.from) && Number.isSafeInteger(b.weekly_cents) && b.weekly_cents > 0 && !budgets.some((x) => x.from === b.from)) budgets.push({ from: b.from, weekly_cents: b.weekly_cents });
-      const groups = S.settings.merchant_groups.slice();
-      for (const g of Array.isArray(s.merchant_groups) ? s.merchant_groups : []) if (typeof g === "string" && g.trim() && !groups.some((x) => E.norm(x) === E.norm(g))) groups.push(g);
-      await saveSettings({ budgets, merchant_groups: groups });
+    const s = r.data.settings || {};
+    // A phone that never edited its categories takes the backup's list as-is; otherwise renamed ones are followed and unknown ones added.
+    let categories = S.settings.categories.slice(), alias = Object.assign({}, S.settings.cat_alias || {});
+    if (!S.settings.customCats && Array.isArray(s.categories) && s.categories.length) {
+      categories = [];
+      for (const c of s.categories) { const n = typeof c === "string" ? E.cleanCatName(c) : ""; if (n && !E.findCat(categories, n)) categories.push(n); }
+      alias = s.cat_alias && typeof s.cat_alias === "object" && !Array.isArray(s.cat_alias) ? Object.assign({}, s.cat_alias) : {};
     }
+    const fix = (c) => {
+      const hit = E.resolveCategory(c, categories, alias);
+      if (hit) return hit;
+      const n = E.cleanCatName(c) || "Miscellaneous";
+      if (!E.findCat(categories, n)) categories.push(n);
+      return E.findCat(categories, n);
+    };
+    const fresh = r.fresh.map((t) => Object.assign({}, t, { source: t.source || "backup", category: fix(t.category), splits: (t.splits || []).map((x) => Object.assign({}, x, { category: fix(x.category) })) }));
+    await addTxns(fresh);
+    const budgets = S.settings.budgets.slice();
+    for (const b of Array.isArray(s.budgets) ? s.budgets : []) if (b && E.isDate(b.from) && Number.isSafeInteger(b.weekly_cents) && b.weekly_cents > 0 && !budgets.some((x) => x.from === b.from)) budgets.push({ from: b.from, weekly_cents: b.weekly_cents });
+    const groups = S.settings.merchant_groups.slice();
+    for (const g of Array.isArray(s.merchant_groups) ? s.merchant_groups : []) if (typeof g === "string" && g.trim() && !groups.some((x) => E.norm(x) === E.norm(g))) groups.push(g);
+    const catsChanged = JSON.stringify(categories) !== JSON.stringify(S.settings.categories) || JSON.stringify(alias) !== JSON.stringify(S.settings.cat_alias || {});
+    await saveSettings(Object.assign({ budgets, merchant_groups: groups }, catsChanged ? { categories, cat_alias: alias } : {}));
     const m = r.data.merchants;
     if (m && typeof m === "object") {
       await enqueue("meta:merchants", async () => {
         const ref = S.cap.db.doc("meta/merchants");
         const snap = await retry(() => ref.get());
         const map = Object.assign({}, (snap.exists && snap.data().map) || {});
-        for (const [k, v] of Object.entries(m)) if (!map[k] && v && v.name && E.CATEGORIES.includes(v.category)) map[k] = { name: v.name, category: v.category, type: v.type || "", n: v.n || 1, last: v.last || S.today };
+        for (const [k, v] of Object.entries(m)) {
+          if (map[k] || !v || !v.name || typeof v.category !== "string") continue;
+          const c = E.resolveCategory(v.category, categories, alias);
+          if (c) map[k] = { name: v.name, category: c, n: v.n || 1, last: v.last || S.today };
+        }
         await retry(() => ref.set({ map, updated_at: nowISO() }));
       });
     }
+  }
+
+  // ---------- Category screens ----------
+  function openNewCategory(o) {
+    const sh = openSheet({ title: "New category", noAutoFocus: true });
+    sh.body.innerHTML = `<label class="field"><span>Name</span><input class="input" id="nc-name" maxlength="${E.MAX_CAT_LEN}" autocomplete="off" autocapitalize="words" placeholder="e.g. Coffee"></label><p class="err" id="nc-err" style="margin:0" role="alert"></p>`;
+    sh.foot.hidden = false;
+    sh.foot.innerHTML = `<span class="grow"></span><button class="btn" data-x="cancel">Cancel</button><button class="btn primary" data-x="add">Add category</button>`;
+    const inp = $("#nc-name", sh.body);
+    let busy = false;
+    const submit = async () => {
+      if (busy) return;
+      busy = true;
+      let r;
+      try { r = await addCategory(inp.value); } catch (e) { r = { error: writeError(e) }; }
+      busy = false;
+      if (r.error) { $("#nc-err", sh.body).textContent = r.error; inp.focus(); return; }
+      sh.close();
+      if (!r.existed) toast(`Added ${r.name}`);
+      if (o && o.onCreate) o.onCreate(r.name);
+    };
+    $("[data-x=cancel]", sh.foot).onclick = () => sh.close();
+    $("[data-x=add]", sh.foot).onclick = submit;
+    inp.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); submit(); } };
+    setTimeout(() => inp.focus(), 30);
+  }
+  function openCategories(o) {
+    const sh = openSheet({ title: "Categories", noAutoFocus: true, onClose: o && o.onClose });
+    const ui = { edit: null, del: null, busy: "", err: "", refocus: false };
+    let list = [];
+    const draw = () => {
+      list = cats();
+      const rows = list.map((c, i) => {
+        const n = E.countCategory(S.txns, c);
+        if (ui.edit === c) {
+          return `<div class="catrow open"><label class="field"><span>Rename ${esc(c)}</span><input class="input" id="cat-rename" maxlength="${E.MAX_CAT_LEN}" value="${esc(c)}" autocomplete="off"></label>
+            <div class="row"><span class="grow note">${n ? `Updates ${plural(n, "expense")}` : ""}</span><button class="btn sm" data-x="cancel">Cancel</button><button class="btn sm primary" data-x="rename" data-i="${i}" ${ui.busy ? "disabled" : ""}>Save</button></div></div>`;
+        }
+        if (ui.del === c) {
+          const others = list.filter((x) => x !== c);
+          const pick = n ? `<label class="field"><span>Move its ${plural(n, "expense")} to</span><select class="select" id="cat-moveto"><option value="" selected disabled>Pick a category</option>${others.map((x) => `<option value="${esc(x)}">${esc(x)}</option>`).join("")}</select></label>` : `<span class="note">No expenses use it.</span>`;
+          return `<div class="catrow open"><strong>Delete ${esc(c)}?</strong>${pick}
+            <div class="row"><span class="grow"></span><button class="btn sm" data-x="cancel">Cancel</button><button class="btn sm danger solid" data-x="delete" data-i="${i}" ${ui.busy ? "disabled" : ""}>Delete</button></div></div>`;
+        }
+        return `<div class="catrow"><span class="cname"><strong>${esc(c)}</strong><span>${n ? plural(n, "expense") : "Not used yet"}</span></span>
+          <button class="icon-btn" data-x="edit" data-i="${i}" aria-label="Rename ${esc(c)}" ${ui.busy ? "disabled" : ""}>${ICON.pencil}</button>
+          <button class="icon-btn" data-x="ask-del" data-i="${i}" aria-label="Delete ${esc(c)}" ${ui.busy || list.length <= 1 ? "disabled" : ""}>${ICON.trash}</button></div>`;
+      }).join("");
+      sh.body.innerHTML = `<div class="row"><label class="grow"><span class="sr">New category</span><input class="input" id="cat-new" maxlength="${E.MAX_CAT_LEN}" placeholder="New category, e.g. Coffee" autocomplete="off" autocapitalize="words"></label><button class="btn primary" data-x="add" ${ui.busy ? "disabled" : ""}>Add</button></div>
+        ${ui.err ? `<p class="err" style="margin:0" role="alert">${esc(ui.err)}</p>` : ""}${ui.busy ? `<p class="note" style="margin:0">${esc(ui.busy)}</p>` : ""}
+        <div class="card catlist">${rows}</div>
+        <p class="note" style="margin:0">Renaming a category updates every expense in it. Deleting one you've used moves its expenses to the category you pick.</p>`;
+      wire();
+      if (ui.refocus) { ui.refocus = false; const n = $("#cat-new", sh.body); if (n) n.focus({ preventScroll: true }); }
+    };
+    const run = async (label, fn) => {
+      ui.busy = label; ui.err = ""; draw();
+      try { await fn(); } catch (e) { ui.err = writeError(e); }
+      ui.busy = "";
+      setTimeout(draw, 120);
+    };
+    function wire() {
+      const add = async () => {
+        const v = $("#cat-new", sh.body).value;
+        await run("Adding…", async () => {
+          const r = await addCategory(v);
+          if (r.error) { ui.err = r.error; return; }
+          if (r.existed) { ui.err = `${r.name} is already in your list.`; return; }
+          ui.refocus = true;
+          toast(`Added ${r.name}`);
+        });
+      };
+      $("[data-x=add]", sh.body).onclick = add;
+      $("#cat-new", sh.body).onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); add(); } };
+      $$("[data-x=cancel]", sh.body).forEach((b) => { b.onclick = () => { ui.edit = ui.del = null; ui.err = ""; draw(); }; });
+      $$("[data-x=edit]", sh.body).forEach((b) => { b.onclick = () => { ui.edit = list[Number(b.dataset.i)]; ui.del = null; ui.err = ""; draw(); const r = $("#cat-rename", sh.body); if (r) { r.focus(); r.select(); } }; });
+      $$("[data-x=ask-del]", sh.body).forEach((b) => { b.onclick = () => { ui.del = list[Number(b.dataset.i)]; ui.edit = null; ui.err = ""; draw(); }; });
+      const ren = $("[data-x=rename]", sh.body);
+      if (ren) {
+        const doRename = () => {
+          const from = list[Number(ren.dataset.i)], v = $("#cat-rename", sh.body).value;
+          run("Updating your expenses…", async () => {
+            const r = await renameCategory(from, v);
+            if (r.error) { ui.err = r.error; return; }
+            ui.edit = null;
+            if (r.same) return;
+            toast(`Renamed ${from} to ${r.name}${r.changed ? ` · ${plural(r.changed, "expense")} updated` : ""}`, { label: "Undo", run: () => renameCategory(r.name, from).then(() => { toast(`Back to ${from}`); setTimeout(draw, 120); }).catch((e) => toast(writeError(e))) });
+          });
+        };
+        ren.onclick = doRename;
+        $("#cat-rename", sh.body).onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); doRename(); } };
+      }
+      const del = $("[data-x=delete]", sh.body);
+      if (del) del.onclick = () => {
+        const name = list[Number(del.dataset.i)];
+        const sel = $("#cat-moveto", sh.body);
+        const moveTo = sel ? sel.value : null;
+        if (sel && !moveTo) { ui.err = "Pick a category for its expenses."; draw(); return; }
+        run("Updating your expenses…", async () => {
+          const r = await deleteCategory(name, moveTo);
+          if (r.error) { ui.err = r.error; return; }
+          ui.del = null;
+          toast(`Deleted ${name}${r.changed ? ` · ${plural(r.changed, "expense")} moved to ${moveTo}` : ""}`, { label: "Undo", run: () => undoDeleteCategory(r.undo).then(() => { toast(`${name} is back`); setTimeout(draw, 120); }).catch((e) => toast(writeError(e))) });
+        });
+      };
+    }
+    draw();
   }
 
   boot();
