@@ -430,6 +430,11 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
 .add-foot-total { flex: 1; min-width: 0; font-size: 14px; color: var(--ink-2); }
 .add-foot-total strong { display: block; color: var(--ink); font-size: 18px; font-variant-numeric: tabular-nums; }
 
+.chip-select.add { border-style: dashed; color: var(--ink-2); font-weight: 500; }
+.hbars .hb-items { grid-column: 1 / -1; list-style: none; margin: 2px 0 2px; padding: 0 0 0 10px; border-left: 2px solid var(--line); display: grid; gap: 2px; }
+.hbars .hb-items li { display: flex; justify-content: space-between; gap: 10px; font-size: 13px; color: var(--ink-2); }
+.hbars .hb-items li span:last-child { font-variant-numeric: tabular-nums; }
+
 /* Editor */
 .amount-row { display: grid; grid-template-columns: 1fr 104px; gap: 10px; }
 .amount-row .input { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
@@ -472,6 +477,34 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
 .icon-btn[disabled] { opacity: 0.35; cursor: default; }
 .icon-btn[disabled]:hover { background: transparent; }
 .btn svg.i { width: 18px; height: 18px; }
+
+/* Week and month review: covers the screen until every category and platform is ticked */
+html.review-open, html.review-open body { overflow: hidden; }
+.review-wrap { position: fixed; inset: 0; z-index: 80; display: flex; justify-content: center; background: var(--bg); animation: fade 0.2s ease-out; }
+.review { width: 100%; max-width: 640px; height: 100%; display: flex; flex-direction: column; background: var(--bg); padding-top: env(safe-area-inset-top, 0px); }
+.rv-head { padding: 18px max(18px, env(safe-area-inset-right, 0px)) 4px max(18px, env(safe-area-inset-left, 0px)); }
+.rv-head h2 { margin: 2px 0 0; font-family: var(--font-display); font-size: 30px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.1; outline: none; }
+.rv-body { flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 12px max(16px, env(safe-area-inset-right, 0px)) 24px max(16px, env(safe-area-inset-left, 0px)); display: grid; gap: 14px; align-content: start; grid-auto-rows: max-content; }
+.rv-hero .hero-amt { font-size: 40px; }
+.rv-lead { margin: 2px 2px 0; color: var(--ink-2); font-size: 14.5px; }
+.rv-list { list-style: none; margin: 0; padding: 0; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); overflow: hidden; }
+.rv-list li + li { border-top: 1px solid var(--line); }
+.rv-row { display: flex; align-items: flex-start; gap: 12px; padding: 13px 14px; cursor: pointer; }
+.rv-row input { flex: none; width: 22px; height: 22px; margin: 1px 0 0; accent-color: var(--accent); cursor: pointer; }
+.rv-main { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.rv-name { font-weight: 600; }
+.rv-sub { font-size: 13px; color: var(--muted); }
+.rv-sub.warn-t { color: var(--warn-ink); } .rv-sub.good-t { color: var(--good-ink); }
+.rv-amt { font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.rv-row:has(input:checked) { background: color-mix(in srgb, var(--accent) 6%, var(--surface)); }
+.rv-foot { display: flex; align-items: center; gap: 12px; padding: 12px max(16px, env(safe-area-inset-right, 0px)) calc(12px + env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px)); border-top: 1px solid var(--line); background: var(--surface); }
+.rv-left { flex: 1; min-width: 0; font-size: 14px; color: var(--ink-2); }
+.rv-foot .btn { min-width: 120px; }
+@media (min-width: 720px) {
+  .review-wrap { align-items: center; padding: 24px; background: var(--scrim); }
+  .review { height: auto; max-height: min(900px, 100%); border-radius: 20px; overflow: hidden; box-shadow: var(--shadow-pop); padding-top: 0; }
+}
+@media (prefers-reduced-motion: reduce) { .review-wrap { animation: none; } }
 
 </style>
 </head>
@@ -694,7 +727,7 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
   const NO_DETAIL = new Set(["Gas"]);
   const DEFAULT_SETTINGS = {
     budgets: [{ from: "2000-01-03", weekly_cents: 105000 }],
-    merchant_groups: ["Amazon"]
+    merchant_groups: ["Amazon", "Uber Eats"]   // platforms: where you buy through; spending counts by what you bought
   };
   const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   const MONTHS_LONG = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
@@ -1167,12 +1200,34 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
     const leftover = findAmounts(remainder);
     if (leftover.length) res.issues.push("There's another amount in this line. Check whether it should be a split.");
 
+    // Platform (Uber Eats, Amazon…), wherever it's typed. What's left is the merchant ("20 uber eats chipotle")
+    // or what you bought ("40 amazon supplements"); with nothing left, it asks what it was.
+    const idx = ctx.merchantIndex;
+    let platform = "", itemMode = false;
+    const plats = ctx.merchantGroups || [];
+    if (plats.length) {
+      const raw = remainder.split(/\s+/).filter(Boolean);
+      const pm = findPlatformWords(raw, platformPhrases(plats, idx));
+      if (pm) {
+        platform = pm.name;
+        let from = pm.at;
+        if (from > 0 && /^(via|on|through|thru|using|from|at|@)$/i.test(raw[from - 1])) from--;
+        remainder = cleanDesc(raw.slice(0, from).concat(raw.slice(pm.at + pm.len)).join(" ")).replace(/^\s*(at|@|from|on|via)\s+/i, "");
+        const restWords = norm(remainder.replace(/\b(refund|refunded|returned|return|credit)\b/ig, " ")).split(" ").filter(Boolean);
+        const lead = restWords.length ? matchMerchant(restWords, idx) : null;
+        itemMode = !restWords.length || (!lead && !!(findCat(ctx.categories || CATEGORIES, stripQualifiers(remainder)) || keywordHit(remainder)));
+      }
+    }
+
     // Merchant
     const words = norm(remainder).split(" ").filter(Boolean);
-    const idx = ctx.merchantIndex;
     let merchant = "", desc = "", idxEntry = null;
-    const mm = words.length ? matchMerchant(words, idx) : null;
-    if (mm) {
+    const mm = !itemMode && words.length ? matchMerchant(words, idx) : null;
+    if (itemMode) {
+      merchant = platform;
+      desc = cleanDesc(remainder);
+      idxEntry = idx ? idx.get(norm(platform)) || null : null;
+    } else if (mm) {
       idxEntry = mm.m;
       merchant = mm.m.name;
       // description = the original-case words that are not the merchant words
@@ -1248,6 +1303,7 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
         original_cents: signed, // in original currency
         amount_cents: currency === "CAD" ? signed : null, // CAD filled after FX
         category, type: "", splits: splits.map((x) => Object.assign({}, x)),
+        platform,
         review,
         qty_index: qty > 1 ? i + 1 : 0, qty
       });
@@ -1297,6 +1353,7 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
     if (!String(t.merchant || "").trim()) errs.push("Enter a merchant.");
     if (!okCat(t.category)) errs.push("Pick a category.");
     if (t.currency === "USD" && !Number.isSafeInteger(t.original_cents)) errs.push("Enter the US dollar amount.");
+    if (t.platform !== undefined && t.platform !== null && (typeof t.platform !== "string" || t.platform.length > 60)) errs.push("Check the platform name.");
     if (t.splits && t.splits.length) {
       if (t.splits.length < 2) errs.push("A split needs at least two parts.");
       const sum = t.splits.reduce((a, s) => a + (Number.isSafeInteger(s.amount_cents) ? s.amount_cents : NaN), 0);
@@ -1389,19 +1446,65 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
     return "ok";
   }
 
-  // ---------- Reporting groups ----------
-  function isGroupMerchant(merchant, settings) {
-    const g = ((settings && settings.merchant_groups) || DEFAULT_SETTINGS.merchant_groups);
-    const n = norm(merchant);
-    return g.find((x) => norm(x) === n) || null;
+  // ---------- Platforms ----------
+  // Your platforms list (stored as merchant_groups). A platform is where you bought through, like Uber Eats or Amazon.
+  function platformList(settings) { return (settings && settings.merchant_groups) || DEFAULT_SETTINGS.merchant_groups; }
+  function findPlatform(name, settings) {
+    const n = norm(name);
+    return n ? platformList(settings).find((x) => norm(x) === n) || null : null;
   }
+  function isGroupMerchant(merchant, settings) { return findPlatform(merchant, settings); }
+  // An expense's platform: the one it was logged through, or (older entries) a merchant that's on the list. Off the list = none.
+  function platformOf(t, settings) {
+    if (!t) return null;
+    const p = typeof t.platform === "string" && t.platform.trim() ? findPlatform(t.platform, settings) : null;
+    return p || findPlatform(t.merchant, settings);
+  }
+  // Every way a platform can be typed: its name plus the aliases the app knows for it ("ubereats", "amzn")
+  function platformPhrases(platforms, idx) {
+    const out = new Map();
+    for (const p of platforms || []) {
+      const np = norm(p);
+      if (!np) continue;
+      out.set(np, p);
+      if (idx) for (const [k, e] of idx) if (e && norm(e.name) === np && !out.has(k)) out.set(k, p);
+    }
+    return out;
+  }
+  function findPlatformWords(raw, phrases) {
+    if (!phrases.size) return null;
+    const nw = raw.map((w) => norm(w));
+    for (let at = 0; at < raw.length; at++) {
+      for (let len = Math.min(5, raw.length - at); len >= 1; len--) {
+        const k = nw.slice(at, at + len).filter(Boolean).join(" ");
+        if (k && phrases.has(k)) return { at, len, name: phrases.get(k) };
+      }
+    }
+    return null;
+  }
+  // Each platform's total, broken down by category (what you bought)
+  function platformTotals(txns, settings) {
+    const m = new Map();
+    for (const t of txns) {
+      const p = platformOf(t, settings);
+      if (!p) continue;
+      let g = m.get(p);
+      if (!g) { g = { name: p, cents: 0, count: 0, items: new Map() }; m.set(p, g); }
+      g.cents += t.amount_cents; g.count += 1;
+      for (const x of portions(t)) g.items.set(x.category, (g.items.get(x.category) || 0) + x.cents);
+    }
+    const byCents = (a, b) => b.cents - a.cents || a.name.localeCompare(b.name);
+    return Array.from(m.values()).map((g) => ({ name: g.name, cents: g.cents, count: g.count, items: Array.from(g.items.entries()).map(([name, cents]) => ({ name, cents })).sort(byCents) })).sort(byCents);
+  }
+
+  // ---------- Reporting groups ----------
   // Every portion of every transaction lands in exactly one group, so groups always add up to the total.
   function groupTotals(txns, settings) {
     const st = settings || {};
     const noDetail = new Set(Array.from(NO_DETAIL).map((n) => resolveCategory(n, st.categories || CATEGORIES, st.cat_alias || {})).filter(Boolean));
     const groups = new Map();
     for (const t of txns) {
-      const gm = isGroupMerchant(t.merchant, settings);
+      const gm = platformOf(t, settings);
       for (const p of portions(t)) {
         let key, kind, item;
         if (gm) { key = gm; kind = "merchant"; item = p.category || "Other"; }
@@ -1509,18 +1612,70 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
     return out;
   }
 
+  // ---------- Week and month reviews ----------
+  // Your goal for a stretch of days: the weekly budget spread per day (a full week = the weekly budget).
+  function goalBetween(a, b, settings) {
+    if (b < a) return 0;
+    let num = 0;
+    for (const d of eachDay(a, b)) num += weeklyBudget(weekStart(d), settings);
+    return Math.floor((num + 3) / 7);
+  }
+  function periodBounds(kind, key) { return kind === "week" ? [key, addDays(key, 6)] : [monthStart(key), monthEnd(key)]; }
+  // To review: the latest finished week and month, once you were tracking by then and haven't reviewed them. Never a backlog.
+  function pendingReviews(today, acked, firstDate) {
+    const out = [];
+    if (!isDate(firstDate)) return out;
+    const a = acked || {};
+    const wk = addDays(weekStart(today), -7);
+    if (addDays(wk, 6) >= firstDate && !(a.weeks && a.weeks[wk])) out.push({ kind: "week", key: wk });
+    const mk = addMonths(monthKey(today), -1);
+    if (monthEnd(mk) >= firstDate && !(a.months && a.months[mk])) out.push({ kind: "month", key: mk });
+    return out;
+  }
+  // "0.88×" and "−12%" against an average; null when there's nothing to compare with
+  function vsAverage(now, avg) {
+    if (!avg || avg <= 0) return null;
+    const r = now / avg, p = (r - 1) * 100;
+    const pct = Math.abs(p) >= 100 ? Math.abs(p).toFixed(0) : Math.abs(p).toFixed(1).replace(/\.0$/, "");
+    return { ratio: r, mult: `${Math.round(r * 100) / 100}×`, pct: `${p >= 0 ? "+" : "−"}${pct}%` };
+  }
+  // A finished week or month: spent, the goal, and the average of up to 4 periods before it that you tracked in full,
+  // overall, by category and by platform.
+  function periodReview(txns, kind, key, settings, firstDate) {
+    const [a, b] = periodBounds(kind, key);
+    const from = isDate(firstDate) && firstDate > a ? firstDate : a;
+    const list = txnsIn(txns, a, b);
+    const prev = [];
+    for (let i = 1; i <= 4; i++) {
+      const k = kind === "week" ? addDays(key, -7 * i) : addMonths(key, -i);
+      const [pa, pb] = periodBounds(kind, k);
+      if (!isDate(firstDate) || pa < firstDate) break;
+      prev.push(txnsIn(txns, pa, pb));
+    }
+    const n = prev.length;
+    const avgOf = (fn) => { const sums = new Map(); for (const l of prev) for (const x of fn(l)) sums.set(x.name, (sums.get(x.name) || 0) + x.cents); return (name) => (n ? Math.round((sums.get(name) || 0) / n) : null); };
+    const catAvg = avgOf(categoryTotals), platAvg = avgOf((l) => platformTotals(l, settings));
+    return {
+      kind, key, start: a, end: b, from, partial: from > a, count: list.length,
+      total: sumCents(list), goal: goalBetween(from, b, settings),
+      avg: n ? Math.round(prev.reduce((s, l) => s + sumCents(l), 0) / n) : null, avgN: n,
+      categories: categoryTotals(list).filter((c) => c.cents !== 0).map((c) => ({ name: c.name, cents: c.cents, avg: catAvg(c.name) })),
+      platforms: platformTotals(list, settings).filter((p) => p.cents !== 0).map((p) => ({ name: p.name, cents: p.cents, items: p.items, avg: platAvg(p.name) }))
+    };
+  }
+
   // ---------- CSV ----------
   function csvCell(v) {
     const s = v === null || v === undefined ? "" : String(v);
     return /[",\n\r]/.test(s) || /^[=+\-@]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   }
-  function toCSV(txns) {
-    const head = ["id", "date", "merchant", "description", "category", "amount_cad", "currency", "original_amount", "fx_rate", "fx_rate_date", "fx_source", "splits", "notes", "needs_review", "source", "created_at", "updated_at"];
+  function toCSV(txns, settings) {
+    const head = ["id", "date", "merchant", "platform", "description", "category", "amount_cad", "currency", "original_amount", "fx_rate", "fx_rate_date", "fx_source", "splits", "notes", "needs_review", "source", "created_at", "updated_at"];
     const rows = [head.join(",")];
     for (const t of txns) {
       const fx = t.fx || {};
       const splits = (t.splits || []).map((s) => `${s.category}${s.note ? " (" + s.note + ")" : ""}: ${centsToDecimal(s.amount_cents)}`).join("; ");
-      rows.push([t.id, t.date, t.merchant, t.description || "", t.category, centsToDecimal(t.amount_cents), t.currency || "CAD",
+      rows.push([t.id, t.date, t.merchant, platformOf(t, settings) || "", t.description || "", t.category, centsToDecimal(t.amount_cents), t.currency || "CAD",
         t.currency === "USD" ? centsToDecimal(t.original_cents) : centsToDecimal(t.amount_cents), fx.rate || "", fx.date || "", fx.source || "",
         splits, t.notes || "", t.review ? "yes" : "", t.source || "", t.created_at || "", t.updated_at || ""].map(csvCell).join(","));
     }
@@ -1545,6 +1700,8 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
     MAX_CAT_LEN, cleanCatName, sortCats, findCat, resolveCategory, recategorize, countCategory, redirectAlias, recategorizeMerchants, findAmounts, parseSplits, parseLine, parseEntry,
     mergeLedger, validateTxn, scaleSplits, portions, txnsIn, sumCents, weeklyBudget, weekSummary, allowance, budgetStatus,
     isGroupMerchant, groupTotals, topGroups, categoryTotals, merchantTotals, weekReport, monthReport, monthBenchmark,
+    platformList, findPlatform, platformOf, platformPhrases, platformTotals,
+    goalBetween, periodBounds, pendingReviews, periodReview, vsAverage,
     weeklySeries, monthlySeries, toCSV, newId
   };
   if (typeof module !== "undefined" && module.exports) module.exports = Engine;
@@ -1601,7 +1758,8 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
     mode: "loading", // loading | ready | nodb | private
     txns: [], settings: normalizeSettings(null), learned: {}, mIndex: E.buildMerchantIndex({}),
     fx: {}, fxThrough: "", fxErr: null,
-    loaded: { ledger: false, settings: false, merchants: false },
+    loaded: { ledger: false, settings: false, merchants: false, reviews: false },
+    acked: { weeks: {}, months: {} },
     today: E.localToday(),
     tab: "home", weekOf: null, selDay: null,
     tx: { period: "month", cat: "", q: "", from: "", to: "", review: false },
@@ -1657,11 +1815,24 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
         S.learned = (s.exists && s.data().map) || {}; S.mIndex = E.buildMerchantIndex(S.learned); S.loaded.merchants = true; ready();
       }, onSubError),
       db.doc("meta/fx").onSnapshot((s) => { S.fxThrough = (s.exists && s.data().through) || ""; }, () => {}),
+      db.doc("meta/reviews").onSnapshot((s) => {
+        const d = (s.exists && s.data()) || {};
+        S.acked = { weeks: Object.assign({}, d.weeks || {}, localAcks.weeks), months: Object.assign({}, d.months || {}, localAcks.months) };
+        S.loaded.reviews = true; scheduleRender();
+      }, () => {}),
       db.doc("meta/backup").onSnapshot((s) => { S.lastBackup = (s.exists && s.data().last) || ""; scheduleRender(); }, () => {})
     ];
   }
+  let seedingPlatforms = false;
   function ready() {
     if (S.loaded.ledger && S.mode === "loading") S.mode = "ready";
+    // Once: Uber Eats joins the platforms list (it already had Amazon)
+    if (S.mode === "ready" && S.loaded.settings && !S.settings.platformsV && !seedingPlatforms) {
+      seedingPlatforms = true;
+      const list = S.settings.merchant_groups.slice();
+      if (!list.some((g) => E.norm(g) === E.norm("Uber Eats"))) list.push("Uber Eats");
+      saveSettings({ merchant_groups: list, platformsV: 1 }).catch(() => { seedingPlatforms = false; });
+    }
     scheduleRender();
   }
   function normalizeSettings(d) {
@@ -1675,7 +1846,8 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
       if (n && !E.findCat(categories, n)) categories.push(n);
     }
     const alias = d && d.cat_alias && typeof d.cat_alias === "object" && !Array.isArray(d.cat_alias) ? d.cat_alias : {};
-    return { budgets: budgets.length ? budgets : E.DEFAULT_SETTINGS.budgets.slice(), merchant_groups: groups, categories: categories.length ? categories : E.CATEGORIES.slice(), cat_alias: alias, customCats: custom && categories.length > 0 };
+    const platformsV = d && Number.isInteger(d.platforms_v) ? d.platforms_v : d ? 0 : 1;
+    return { budgets: budgets.length ? budgets : E.DEFAULT_SETTINGS.budgets.slice(), merchant_groups: groups, categories: categories.length ? categories : E.CATEGORIES.slice(), cat_alias: alias, customCats: custom && categories.length > 0, platformsV };
   }
 
   // ---------- Writes ----------
@@ -1763,7 +1935,7 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
   // Pass only what changed. The category list is stored once he has edited it.
   function saveSettings(patch) {
     const next = Object.assign({}, S.settings, patch || {});
-    const doc = { budgets: next.budgets, merchant_groups: next.merchant_groups, updated_at: nowISO() };
+    const doc = { budgets: next.budgets, merchant_groups: next.merchant_groups, platforms_v: next.platformsV || 0, updated_at: nowISO() };
     if ((patch && patch.categories) || S.settings.customCats) { doc.categories = next.categories; doc.cat_alias = next.cat_alias || {}; }
     S.settings = normalizeSettings(doc); // the next step sees the change right away
     return enqueue("meta:settings", () => retry(() => S.cap.db.doc("meta/settings").set(doc))).catch(async (e) => {
@@ -1788,6 +1960,24 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
     const list = cats().slice();
     if (selected && !list.includes(selected)) list.push(selected);
     return list.map((c) => `<option value="${esc(c)}" ${c === selected ? "selected" : ""}>${esc(c)}</option>`).join("") + (o && o.noNew ? "" : `<option value="__new__">+ New category…</option>`);
+  }
+  // Platforms: where you bought through (Uber Eats, Amazon). Stored as merchant_groups.
+  function platformOptions(selected, o) {
+    const list = S.settings.merchant_groups.slice();
+    if (selected && !list.some((x) => E.norm(x) === E.norm(selected))) list.push(selected);
+    return list.map((x) => `<option value="${esc(x)}" ${selected && E.norm(x) === E.norm(selected) ? "selected" : ""}>${esc(x)}</option>`).join("") +
+      (o && o.none ? `<option value="">No platform</option>` : "") + `<option value="__newp__">+ New platform…</option>`;
+  }
+  async function addPlatform(raw) {
+    const v = String(raw || "").replace(/\s+/g, " ").trim();
+    if (!v || !E.norm(v)) return { error: "Type a name for the platform." };
+    if (v.length > 40) return { error: "Keep the name under 40 characters." };
+    const known = S.mIndex.get(E.norm(v));
+    const name = known ? known.name : E.titleCase(v);
+    const have = E.findPlatform(name, S.settings);
+    if (have) return { name: have, existed: true };
+    await saveSettings({ merchant_groups: S.settings.merchant_groups.concat([name]) });
+    return { name };
   }
   function catNameError(name) {
     if (!name) return "Type a name for the category.";
@@ -2015,6 +2205,7 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
       else if (S.tab === "tx") v.innerHTML = viewTx();
       else v.innerHTML = viewAnalytics();
     });
+    maybeReview();
   }
 
   // ---------- Dashboard ----------
@@ -2149,6 +2340,8 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
 
   function txSub(t) {
     const parts = [];
+    const pl = E.platformOf(t, S.settings);
+    if (pl && E.norm(pl) !== E.norm(t.merchant)) parts.push(esc(pl));
     if (t.description) parts.push(esc(t.description));
     if (t.splits && t.splits.length) parts.push(`split ${t.splits.length} ways`);
     else parts.push(esc(t.category));
@@ -2180,7 +2373,7 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
   const PERIODS = [["week", "This week"], ["lastweek", "Last week"], ["month", "This month"], ["lastmonth", "Last month"], ["30d", "Last 30 days"], ["90d", "Last 90 days"], ["year", "This year"], ["all", "All time"], ["custom", "Custom dates"]];
   function matchesQuery(t, q) {
     if (!q) return true;
-    const hay = [t.merchant, t.description, t.notes, t.category, t.type, E.centsToDecimal(t.amount_cents), t.currency === "USD" ? E.centsToDecimal(t.original_cents) : "",
+    const hay = [t.merchant, t.platform || "", E.platformOf(t, S.settings) || "", t.description, t.notes, t.category, t.type, E.centsToDecimal(t.amount_cents), t.currency === "USD" ? E.centsToDecimal(t.original_cents) : "",
       ...(t.splits || []).map((s) => `${s.category} ${s.type || ""} ${s.note || ""}`)].join(" ").toLowerCase();
     return q.toLowerCase().split(/\s+/).filter(Boolean).every((w) => hay.includes(w));
   }
@@ -2188,22 +2381,26 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
     const [a, b] = periodRange(S.tx.period, S.tx.from, S.tx.to);
     let list = S.txns.filter((t) => t.date >= a && t.date <= b);
     if (S.tx.review) list = list.filter((t) => t.review);
-    if (S.tx.cat) list = list.filter((t) => E.portions(t).some((p) => p.category === S.tx.cat));
+    if (S.tx.cat.startsWith("p:")) { const want = S.tx.cat.slice(2); list = list.filter((t) => E.platformOf(t, S.settings) === want); }
+    else if (S.tx.cat) list = list.filter((t) => E.portions(t).some((p) => p.category === S.tx.cat));
     if (S.tx.q.trim()) list = list.filter((t) => matchesQuery(t, S.tx.q.trim()));
     return { list, a, b };
   }
   function catCents(t, cat) { return E.portions(t).filter((p) => p.category === cat).reduce((s, p) => s + p.cents, 0); }
   function viewTx() {
     const { list } = txFiltered();
-    const total = S.tx.cat ? list.reduce((s, t) => s + catCents(t, S.tx.cat), 0) : E.sumCents(list);
+    const byCat = S.tx.cat && !S.tx.cat.startsWith("p:");
+    const total = byCat ? list.reduce((s, t) => s + catCents(t, S.tx.cat), 0) : E.sumCents(list);
     const byDay = new Map();
     for (const t of list.slice().reverse()) { if (!byDay.has(t.date)) byDay.set(t.date, []); byDay.get(t.date).push(t); }
     const groups = Array.from(byDay.entries()).sort((x, y) => (x[0] < y[0] ? 1 : -1)).map(([d, ts]) => {
-      const dt = S.tx.cat ? ts.reduce((s, t) => s + catCents(t, S.tx.cat), 0) : E.sumCents(ts);
-      return `<section class="dgroup"><div class="dgroup-head"><span>${esc(E.fmtDayLong(d))}</span><span class="num">${fmt(dt)}</span></div><ul class="receipt">${ts.map((t) => txRow(t, S.tx.cat ? { cents: catCents(t, S.tx.cat) } : undefined)).join("")}</ul></section>`;
+      const dt = byCat ? ts.reduce((s, t) => s + catCents(t, S.tx.cat), 0) : E.sumCents(ts);
+      return `<section class="dgroup"><div class="dgroup-head"><span>${esc(E.fmtDayLong(d))}</span><span class="num">${fmt(dt)}</span></div><ul class="receipt">${ts.map((t) => txRow(t, byCat ? { cents: catCents(t, S.tx.cat) } : undefined)).join("")}</ul></section>`;
     }).join("");
     const periodOpts = PERIODS.map(([k, l]) => `<option value="${k}" ${S.tx.period === k ? "selected" : ""}>${l}</option>`).join("");
-    const catOpts = `<option value="">All categories</option>` + cats().map((c) => `<option value="${esc(c)}" ${S.tx.cat === c ? "selected" : ""}>${esc(c)}</option>`).join("");
+    const plats = S.settings.merchant_groups;
+    const catOpts = `<option value="">All categories</option>` + cats().map((c) => `<option value="${esc(c)}" ${S.tx.cat === c ? "selected" : ""}>${esc(c)}</option>`).join("") +
+      (plats.length ? `<optgroup label="Platforms">${plats.map((x) => `<option value="p:${esc(x)}" ${S.tx.cat === "p:" + x ? "selected" : ""}>${esc(x)}</option>`).join("")}</optgroup>` : "");
     return `<h1 class="view-title">Transactions</h1>
       <div class="toolbar">
         <label class="search"><span class="sr">Search</span>${ICON.search}<input class="input" id="tx-q" type="search" placeholder="Search merchants, notes, amounts" value="${esc(S.tx.q)}" data-input="tx-q" autocomplete="off"></label>
@@ -2213,7 +2410,7 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
         </div>
         ${S.tx.period === "custom" ? `<div class="grid2"><label class="field"><span>From</span><input class="input" type="date" id="tx-from" value="${esc(S.tx.from)}" data-change="tx-from"></label><label class="field"><span>To</span><input class="input" type="date" id="tx-to" value="${esc(S.tx.to)}" data-change="tx-to"></label></div>` : ""}
       </div>
-      <div class="summary-line"><span><strong class="num">${fmt(total)}</strong> · ${plural(list.length, "expense")}${S.tx.cat ? ` · only the ${esc(S.tx.cat)} part of splits counts` : ""}</span>
+      <div class="summary-line"><span><strong class="num">${fmt(total)}</strong> · ${plural(list.length, "expense")}${byCat ? ` · only the ${esc(S.tx.cat)} part of splits counts` : ""}</span>
         <span class="row"><label class="toggle"><input type="checkbox" id="tx-review" data-change="tx-review" ${S.tx.review ? "checked" : ""}>Needs a look</label>
         <button class="btn sm" data-act="export-filtered" ${list.length ? "" : "disabled"}>${ICON.download}CSV</button></span></div>
       ${groups || `<div class="empty card"><strong>No expenses here</strong>${S.txns.length ? "Try another period or clear the search." : "Tap + to add your first expense."}</div>`}`;
@@ -2268,6 +2465,11 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
     const max = Math.max(1, ...items.map((i) => i.cents));
     return `<ol class="hbars">${items.map((i) => `<li><span class="hb-name">${esc(i.name)}${i.meta ? `<span class="hb-meta">${esc(i.meta)}</span>` : ""}</span><span class="hb-val">${fmt(i.cents)}</span><span class="hb-track"><span class="hb-fill" style="width:${pct(i.cents, max)}%"></span></span></li>`).join("")}</ol>${opts.more ? `<p class="note" style="margin:10px 0 0">${esc(opts.more)}</p>` : ""}`;
   }
+  function platformBars(items) {
+    const max = Math.max(1, ...items.map((i) => i.cents));
+    return `<ol class="hbars">${items.map((x) => `<li><span class="hb-name">${esc(x.name)}<span class="hb-meta">${plural(x.count, "order")}</span></span><span class="hb-val">${fmt(x.cents)}</span><span class="hb-track"><span class="hb-fill" style="width:${pct(x.cents, max)}%"></span></span>
+      <ul class="hb-items">${x.items.map((it) => `<li><span>${esc(it.name)}</span><span>${fmt(it.cents)}</span></li>`).join("")}</ul></li>`).join("")}</ol>`;
+  }
   function tableDetails(head, rows) {
     return `<details class="tbl"><summary>Show as table</summary><div class="table-wrap"><table class="t"><thead><tr>${head.map((h, i) => `<th class="${i ? "r" : ""}">${esc(h)}</th>`).join("")}</tr></thead><tbody>${rows.map((r) => `<tr>${r.map((c, i) => `<td class="${i ? "r" : ""}">${esc(c)}</td>`).join("")}</tr>`).join("")}</tbody></table></div></details>`;
   }
@@ -2297,6 +2499,7 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
       cols: months.map((m) => ({ label: E.fmtMonthShort(m.month), value: m.cents, tick: m.benchmark, cls: E.monthEnd(m.month) >= S.today ? "cur" : "", tip: `${E.fmtMonth(m.month)}\n${fmt(m.cents)} spent\nBenchmark ${fmt(m.benchmark)}`, act: "month-report", data: `data-month="${m.month}"` }))
     });
     const cats = E.categoryTotals(list).filter((c) => c.cents > 0);
+    const plats = E.platformTotals(list, S.settings).filter((x) => x.cents > 0);
     const merchants = E.merchantTotals(list).filter((m) => m.cents > 0);
     const topM = merchants.slice(0, 12).map((m) => ({ name: m.name, cents: m.cents, meta: plural(m.count, "visit") }));
     return `${kpis}<div class="an-grid">
@@ -2306,7 +2509,8 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
       <section class="card"><div class="card-head"><h2>Monthly spending</h2><span class="note">Tick: $${(budgetNow / 700).toFixed(0)}/day benchmark</span></div>${moChart}
         ${tableDetails(["Month", "Spent", "Benchmark"], months.map((m) => [E.fmtMonth(m.month), fmt(m.cents), fmt(m.benchmark)]))}</section>
       <section class="card"><div class="card-head"><h2>By category</h2><span class="note">Splits counted by part</span></div>${cats.length ? hbars(cats) : `<p class="note">Nothing in this range.</p>`}</section>
-      <section class="card wide"><div class="card-head"><h2>Top merchants</h2><span class="note">${plural(merchants.length, "merchant")}</span></div>${topM.length ? hbars(topM, { more: merchants.length > 12 ? `${merchants.length - 12} more merchants: ${fmt(E.sumCents(merchants.slice(12).map((m) => ({ amount_cents: m.cents }))))}` : "" }) : `<p class="note">Nothing in this range.</p>`}</section>
+      <section class="card"><div class="card-head"><h2>By platform</h2><span class="note">By what you bought</span></div>${plats.length ? platformBars(plats) : `<p class="note">Nothing bought through a platform in this range.</p>`}</section>
+      <section class="card"><div class="card-head"><h2>Top merchants</h2><span class="note">${plural(merchants.length, "merchant")}</span></div>${topM.length ? hbars(topM, { more: merchants.length > 12 ? `${merchants.length - 12} more merchants: ${fmt(E.sumCents(merchants.slice(12).map((m) => ({ amount_cents: m.cents }))))}` : "" }) : `<p class="note">Nothing in this range.</p>`}</section>
     </div>`;
   }
   function viewWeeks() {
@@ -2434,7 +2638,7 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
       close() {
         if (o.beforeClose && o.beforeClose() === false) return;
         wrap.remove(); const i = sheets.indexOf(api); if (i >= 0) sheets.splice(i, 1);
-        if (!sheets.length) document.documentElement.classList.remove("sheet-open");
+        if (!sheets.length) { document.documentElement.classList.remove("sheet-open"); setTimeout(maybeReview, 60); }
         if (prevFocus && prevFocus.focus && document.contains(prevFocus)) prevFocus.focus({ preventScroll: true });
         if (o.onClose) o.onClose();
       },
@@ -2538,7 +2742,7 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
   });
   window.addEventListener("scroll", () => { const tb = $(".topbar"); if (tb) tb.classList.toggle("scrolled", window.scrollY > 4); }, { passive: true });
   document.addEventListener("keydown", (e) => {
-    if (sheets.length || S.mode !== "ready") return;
+    if (sheets.length || review || S.mode !== "ready") return;
     const tag = (e.target.tagName || "").toLowerCase();
     if (tag === "input" || tag === "textarea" || tag === "select" || e.metaKey || e.ctrlKey || e.altKey) return;
     if (e.key === "n" || e.key === "a") { e.preventDefault(); openAdd(null); }
@@ -2584,6 +2788,7 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
           const ov = st.overrides[r.line] || {};
           const x = Object.assign({}, it, { line: r.line, issues: r.issues.slice() });
           if (ov.category) { x.category = ov.category; x.review = ""; x.picked = true; }
+          if (ov.platform !== undefined) x.platform = ov.platform;
           if (x.currency === "USD") {
             const f = st.fx[x.date];
             const manual = st.cad[r.line + "|" + x.date];
@@ -2617,6 +2822,12 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
       needRates();
       const pv = $("#add-preview", sh.body);
       const catSel = (it) => `<option value="" disabled ${it.review === "category" ? "selected" : ""}>Pick a category</option>` + catOptions(it.review === "category" ? null : it.category);
+      // Platform first, then category. Not shown when the merchant is the platform itself (40 amazon supplements).
+      const platChip = (it, i) => {
+        if (E.findPlatform(it.merchant, S.settings)) return "";
+        const pl = it.platform || "";
+        return `<label class="chip-select ${pl ? "" : "add"}"><span>${pl ? esc(pl) : "+ Platform"}</span><select data-i="${i}" data-k="platform" aria-label="Platform">${pl ? "" : `<option value="" selected disabled>Bought through…</option>`}${platformOptions(pl, { none: !!pl })}</select></label>`;
+      };
       pv.innerHTML = items.map((it, i) => {
         if (it.error) return `<li class="pv-item bad"><div class="pv-top"><span class="pv-name">${esc(it.line)}</span></div><span class="err">${esc(it.error)}. Start the line with the amount, like 25.99 chipotle.</span></li>`;
         const f = it.currency === "USD" ? st.fx[it.date] : null;
@@ -2635,13 +2846,19 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
         const cadInput = it.currency === "USD" && (it.amount_cents === null || (f && f.estimate) || st.cad[it.line + "|" + it.date] !== undefined)
           ? `<label class="field"><span>CAD charged${f && f.error ? ` (${esc(f.error)})` : ""}</span><input class="input" inputmode="decimal" data-i="${i}" data-k="cad" placeholder="${it.amount_cents !== null ? E.centsToDecimal(it.amount_cents) : "0.00"}" value="${st.cad[it.line + "|" + it.date] !== undefined ? E.centsToDecimal(st.cad[it.line + "|" + it.date]) : ""}"></label>` : "";
         return `<li class="pv-item ${flagged ? "flagged" : ""}"><div class="pv-top"><span class="pv-name">${esc(it.merchant)}${it.description ? `<small>${esc(it.description)}</small>` : ""}${it.qty > 1 ? `<small>${it.qty_index} of ${it.qty}</small>` : ""}</span><span class="pv-amt">${amt}</span></div>
-          <div class="pv-meta">${cat}${dateNote ? `<span class="chip">${dateNote.slice(3)}</span>` : ""}${it.currency === "USD" && it.fx && it.fx.provisional ? `<span class="chip" data-tip="Today's Bank of Canada rate is published around 4:30 PM ET. You can recalculate it later from the expense.">Provisional rate</span>` : ""}</div>
+          <div class="pv-meta">${platChip(it, i)}${cat}${dateNote ? `<span class="chip">${dateNote.slice(3)}</span>` : ""}${it.currency === "USD" && it.fx && it.fx.provisional ? `<span class="chip" data-tip="Today's Bank of Canada rate is published around 4:30 PM ET. You can recalculate it later from the expense.">Provisional rate</span>` : ""}</div>
           ${splits}${issues.map((x) => `<span class="flag">${esc(x)}</span>`).join("")}${cadInput}</li>`;
       }).join("");
       $$("select[data-i]", pv).forEach((s) => {
         s.onchange = () => {
           const it = items[Number(s.dataset.i)];
           const ov = st.overrides[it.line] = st.overrides[it.line] || {};
+          if (s.dataset.k === "platform") {
+            if (s.value === "__newp__") { refresh(); openNewPlatform({ onCreate: (name) => { ov.platform = name; refresh(); } }); return; }
+            ov.platform = s.value;
+            refresh();
+            return;
+          }
           if (s.value === "__new__") {
             refresh();
             openNewCategory({ onCreate: (name) => { ov.category = name; refresh(); } });
@@ -2682,6 +2899,7 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
           original_cents: x.currency === "USD" ? x.original_cents : x.amount_cents,
           fx: x.currency === "USD" ? x.fx : null,
           category: x.category, type: "", splits: x.splits.map((s) => ({ category: s.category, type: "", note: s.note || "", amount_cents: s.amount_cents })),
+          platform: x.platform || "",
           notes: "", review, source: "app", created_at: new Date(Date.parse(now) + i).toISOString(), updated_at: now, rev: 1
         };
       });
@@ -2740,6 +2958,7 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
     st.bank = t.currency === "USD" && t.fx && t.fx.source === "Bank charge" ? E.centsToDecimal(t.amount_cents) : "";
     st.fx = t.fx ? Object.assign({}, t.fx) : null;
     st.category = t.category; st.type = t.type || ""; st.remember = true;
+    st.platform = t.platform || ""; st.showPlat = !!st.platform;
 
     function cadAmount() {
       const a = E.parseMoney(amt.value);
@@ -2783,19 +3002,34 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
       drawSplitStatus();
     }
     function drawCat() {
-      const isGroup = !!E.isGroupMerchant(mer.value, S.settings);
+      const isGroup = !!E.isGroupMerchant(mer.value, S.settings);   // the merchant is itself a platform (Amazon)
       const block = $("#ed-catblock", sh.body);
-      if (st.splits.length) { block.innerHTML = ""; return; }
-      const known = S.mIndex.get(E.norm(mer.value));
-      const knownCat = known ? E.resolveCategory(known.category, cats(), S.settings.cat_alias) : null;
-      const changedFromKnown = !isGroup && knownCat !== st.category;
-      block.innerHTML = `<label class="field"><span>Category</span><select class="select" id="ed-cat">${catOpts(st.category)}</select></label>
-        ${changedFromKnown && mer.value.trim() ? `<label class="toggle" style="margin-top:8px"><input type="checkbox" id="ed-remember" ${st.remember ? "checked" : ""}>Use ${esc(st.category)} for ${esc(mer.value.trim())} from now on</label>` : ""}`;
-      $("#ed-cat", sh.body).onchange = (e) => {
-        if (e.target.value === "__new__") { drawCat(); openNewCategory({ onCreate: (name) => { st.category = name; drawCat(); } }); return; }
-        st.category = e.target.value; drawCat();
+      const platUI = !isGroup && (st.showPlat || !!st.platform);
+      const platField = `<label class="field"><span>Platform</span><select class="select" id="ed-plat">${st.platform ? "" : `<option value="" selected disabled>Pick one</option>`}${platformOptions(st.platform, { none: true })}</select></label>`;
+      const addBtn = !isGroup && !platUI ? `<button class="btn sm" type="button" id="ed-plat-add">${ICON.plus}Add platform</button>` : "";
+      if (st.splits.length) {
+        block.innerHTML = platUI ? platField : addBtn;
+      } else {
+        const known = S.mIndex.get(E.norm(mer.value));
+        const knownCat = known ? E.resolveCategory(known.category, cats(), S.settings.cat_alias) : null;
+        const changedFromKnown = !isGroup && knownCat !== st.category;
+        const catField = `<label class="field"><span>Category</span><select class="select" id="ed-cat">${catOpts(st.category)}</select></label>`;
+        block.innerHTML = `${platUI ? `<div class="grid2">${platField}${catField}</div>` : catField}
+          ${changedFromKnown && mer.value.trim() ? `<label class="toggle" style="margin-top:8px"><input type="checkbox" id="ed-remember" ${st.remember ? "checked" : ""}>Use ${esc(st.category)} for ${esc(mer.value.trim())} from now on</label>` : ""}
+          ${addBtn ? `<div style="margin-top:8px">${addBtn}</div>` : ""}`;
+        $("#ed-cat", sh.body).onchange = (e) => {
+          if (e.target.value === "__new__") { drawCat(); openNewCategory({ onCreate: (name) => { st.category = name; drawCat(); } }); return; }
+          st.category = e.target.value; drawCat();
+        };
+        const rem = $("#ed-remember", sh.body); if (rem) rem.onchange = (e) => { st.remember = e.target.checked; };
+      }
+      const ps = $("#ed-plat", sh.body);
+      if (ps) ps.onchange = () => {
+        if (ps.value === "__newp__") { drawCat(); openNewPlatform({ onCreate: (name) => { st.platform = name; st.showPlat = true; drawCat(); } }); return; }
+        st.platform = ps.value; st.showPlat = !!ps.value; drawCat();
       };
-      const rem = $("#ed-remember", sh.body); if (rem) rem.onchange = (e) => { st.remember = e.target.checked; };
+      const ab = $("#ed-plat-add", sh.body);
+      if (ab) ab.onclick = () => { st.showPlat = true; drawCat(); const sel = $("#ed-plat", sh.body); if (sel) sel.focus(); };
     }
     function drawSplitStatus() {
       const el = $("#ed-split-status", sh.body);
@@ -2836,7 +3070,7 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
         drawSplits();
       };
       drawSplitStatus();
-      $("#ed-catblock", sh.body).innerHTML = "";
+      drawCat();
     }
     $("#ed-split-toggle", sh.body).onclick = () => {
       if (st.splits.length) st.splits = [];
@@ -2857,7 +3091,7 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
       drawFx(); drawSplitStatus();
     };
     amt.oninput = () => { drawCad(); };
-    mer.oninput = () => { if (!st.splits.length) drawCat(); };
+    mer.oninput = () => { drawCat(); };
     dateIn.onchange = () => {
       if (cur.value === "USD" && st.fx && st.fx.date && E.isDate(dateIn.value) && dateIn.value !== t.date && st.fx.source !== "Bank charge") {
         st.fxMsg = "The date changed. Recalculate to use that day's rate.";
@@ -2919,6 +3153,10 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
         const bank = E.parseMoney(st.bank);
         next.fx = st.bank && bank !== null ? { rate: E.impliedRate(cad, a), date: dateIn.value, source: "Bank charge", provisional: false, boc_rate: st.fx && st.fx.source !== "Bank charge" ? st.fx.rate : null } : Object.assign({}, st.fx);
       } else next.fx = null;
+      // Platform: what was picked; for a merchant that is itself a platform, kept as it was
+      let plat = st.platform || "";
+      if (E.isGroupMerchant(next.merchant, S.settings)) plat = orig.platform ? E.isGroupMerchant(next.merchant, S.settings) : "";
+      if (plat) next.platform = plat; else delete next.platform;
       if (st.splits.length) {
         next.splits = st.splits.map((s) => ({ category: s.category, type: (s.type || "").trim(), note: (s.note || "").trim(), amount_cents: E.parseMoney(s.amt) }));
         const largest = next.splits.slice().sort((x, y) => (y.amount_cents || 0) - (x.amount_cents || 0))[0];
@@ -2942,7 +3180,7 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
     if (!st.splits.length) drawCat();
   }
   const DIFF_FIELDS = [
-    ["date", "Date", (v) => (E.isDate(v) ? E.fmtDay(v) : v)], ["merchant", "Merchant"], ["description", "Description"], ["amount_cents", "Amount", (v) => fmt(v)],
+    ["date", "Date", (v) => (E.isDate(v) ? E.fmtDay(v) : v)], ["merchant", "Merchant"], ["platform", "Platform"], ["description", "Description"], ["amount_cents", "Amount", (v) => fmt(v)],
     ["currency", "Currency"], ["category", "Category"], ["notes", "Notes"],
     ["splits", "Split", (v) => (v && v.length ? v.map((s) => `${s.category} ${fmt(s.amount_cents)}`).join(", ") : "none")],
     ["fx", "Rate", (v) => (v ? `${v.rate} (${v.source})` : "none")]
@@ -2978,11 +3216,11 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
           <p class="note" style="margin:0">Add, rename or delete the categories you pick from. You can also add one while logging an expense.</p>
           <button class="btn block" id="st-cats">${ICON.pencil}Edit categories (${cats().length})</button>
         </div>
-        <div class="section-title">Stores reported by what you bought</div>
+        <div class="section-title">Platforms</div>
         <div class="card" style="display:grid;gap:10px">
-          <p class="note" style="margin:0">These stores get their own group in reports, broken down by category. Use it for stores that sell many different things, like Amazon.</p>
+          <p class="note" style="margin:0">Apps and stores you buy through, like Uber Eats and Amazon. Type one first, like 20 uber eats chipotle. Spending still counts in the category of what you bought, and reports show each platform's total.</p>
           <div class="row wrap">${S.settings.merchant_groups.map((g, i) => `<span class="chip" style="height:30px;padding-right:2px">${esc(g)}<button class="icon-btn" style="width:26px;height:26px" data-g="${i}" aria-label="Remove ${esc(g)}">${ICON.x}</button></span>`).join("") || `<span class="note">None</span>`}</div>
-          <div class="row"><input class="input" id="st-group" placeholder="Add a store, e.g. Costco"><button class="btn sm" id="st-group-add">Add</button></div>
+          <div class="row"><input class="input" id="st-group" placeholder="Add a platform, e.g. DoorDash"><button class="btn sm" id="st-group-add">Add</button></div>
         </div>
         <div class="section-title">Data</div>
         <div class="card" style="display:grid;gap:8px">
@@ -3013,10 +3251,7 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
       $("#st-group-add", sh.body).onclick = async () => {
         const v = $("#st-group", sh.body).value.trim();
         if (!v) return;
-        const known = S.mIndex.get(E.norm(v));
-        const name = known ? known.name : E.titleCase(v);
-        if (S.settings.merchant_groups.some((g) => E.norm(g) === E.norm(name))) return;
-        try { await saveSettings({ merchant_groups: S.settings.merchant_groups.concat([name]) }); } catch (e) { toast(writeError(e)); }
+        try { const r = await addPlatform(v); if (r.error) { toast(r.error); return; } if (r.existed) { toast(`${r.name} is already on the list`); return; } } catch (e) { toast(writeError(e)); }
         setTimeout(draw, 300);
       };
       $("#st-cats", sh.body).onclick = () => openCategories({ onClose: draw });
@@ -3093,7 +3328,7 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
       return false;
     }
   }
-  function exportCSV(list, label) { saveFile(`spend-tracker-${label}-${S.today}.csv`, E.toCSV(list)); }
+  function exportCSV(list, label) { saveFile(`spend-tracker-${label}-${S.today}.csv`, E.toCSV(list, S.settings)); }
   async function exportBackup() {
     const settings = { budgets: S.settings.budgets, merchant_groups: S.settings.merchant_groups, categories: S.settings.categories, cat_alias: S.settings.cat_alias };
     const data = JSON.stringify({ app: "Spend Tracker", version: 2, exported_at: nowISO(), settings, merchants: S.learned, transactions: S.txns }, null, 2);
@@ -3151,6 +3386,125 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
         await retry(() => ref.set({ map, updated_at: nowISO() }));
       });
     }
+  }
+
+  function openNewPlatform(o) {
+    const sh = openSheet({ title: "New platform", noAutoFocus: true });
+    sh.body.innerHTML = `<label class="field"><span>Name</span><input class="input" id="np-name" maxlength="40" autocomplete="off" autocapitalize="words" placeholder="e.g. DoorDash"></label><p class="note" style="margin:0">Where you bought through, like a delivery app or an online store.</p><p class="err" id="np-err" style="margin:0" role="alert"></p>`;
+    sh.foot.hidden = false;
+    sh.foot.innerHTML = `<span class="grow"></span><button class="btn" data-x="cancel">Cancel</button><button class="btn primary" data-x="add">Add platform</button>`;
+    const inp = $("#np-name", sh.body);
+    let busy = false;
+    const submit = async () => {
+      if (busy) return;
+      busy = true;
+      let r;
+      try { r = await addPlatform(inp.value); } catch (e) { r = { error: writeError(e) }; }
+      busy = false;
+      if (r.error) { $("#np-err", sh.body).textContent = r.error; inp.focus(); return; }
+      sh.close();
+      if (!r.existed) toast(`Added ${r.name}`);
+      if (o && o.onCreate) o.onCreate(r.name);
+    };
+    $("[data-x=cancel]", sh.foot).onclick = () => sh.close();
+    $("[data-x=add]", sh.foot).onclick = submit;
+    inp.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); submit(); } };
+    setTimeout(() => inp.focus(), 30);
+  }
+
+  // ---------- Week and month review ----------
+  // When a week or month ends, its review covers the screen until every category and platform is ticked.
+  const localAcks = { weeks: {}, months: {} };
+  let review = null;
+  function maybeReview() {
+    if (review || S.mode !== "ready" || !S.loaded.reviews || !S.loaded.settings || sheets.length) return;
+    const first = S.txns.length ? S.txns[0].date : null;
+    const due = E.pendingReviews(S.today, S.acked, first);
+    if (due.length) openReview(due[0], first);
+  }
+  function saveAck(bucket, key, val) {
+    return enqueue("meta:reviews", async () => {
+      const ref = S.cap.db.doc("meta/reviews");
+      const snap = await retry(() => ref.get());
+      const cur = (snap.exists && snap.data()) || {};
+      const next = { weeks: Object.assign({}, cur.weeks || {}), months: Object.assign({}, cur.months || {}), updated_at: nowISO() };
+      next[bucket][key] = val;
+      await retry(() => ref.set(next));
+    });
+  }
+  function openReview(p, first) {
+    const r = E.periodReview(S.txns, p.kind, p.key, S.settings, first);
+    const wk = p.kind === "week", unit = wk ? "week" : "month";
+    const avgName = r.avgN === 1 ? `Last ${unit}` : `${r.avgN}-${unit} average`;
+    const compare = (now, avg) => {
+      if (!r.avgN) return null;
+      const v = E.vsAverage(now, avg);
+      if (!v) return { text: `New this ${unit}`, cls: "" };
+      return { text: `${r.avgN === 1 ? `Last ${unit}` : "Avg"} ${fmt(avg)} · ${v.mult} (${v.pct})`, cls: v.ratio >= 1.1 ? "warn-t" : v.ratio <= 0.9 ? "good-t" : "" };
+    };
+    const row = (name, cents, avg, extra) => {
+      const c = compare(cents, avg);
+      return `<li><label class="rv-row"><input type="checkbox" data-rv aria-label="${esc(`${name}, ${fmt(cents)}`)}"><span class="rv-main"><span class="rv-name">${esc(name)}</span>${extra ? `<span class="rv-sub">${extra}</span>` : ""}${c ? `<span class="rv-sub ${c.cls}">${esc(c.text)}</span>` : ""}</span><span class="rv-amt">${fmt(cents)}</span></label></li>`;
+    };
+    const days = E.diffDays(r.from, r.end) + 1;
+    const d = r.goal - r.total;
+    const v = E.vsAverage(r.total, r.avg);
+    const pill = d < 0 ? `<span class="pill over">${ICON.over}Over by ${fmt(-d)}</span>` : `<span class="pill ok">${ICON.check}Under by ${fmt(d)}</span>`;
+    const cats = r.categories.map((c) => row(c.name, c.cents, c.avg)).join("");
+    const plats = r.platforms.map((x) => row(x.name, x.cents, x.avg, esc(x.items.map((it) => `${it.name} ${fmt(it.cents)}`).join(", ")))).join("");
+    const wrap = document.createElement("div");
+    wrap.className = "review-wrap";
+    wrap.innerHTML = `<section class="review" role="dialog" aria-modal="true" aria-labelledby="rv-title">
+      <header class="rv-head"><div class="eyebrow">${wk ? "Week" : "Month"} in review</div><h2 id="rv-title" tabindex="-1">${esc(wk ? E.fmtRange(r.start, r.end) : E.fmtMonth(p.key))}</h2>
+        ${r.partial ? `<p class="note" style="margin:2px 0 0">Counted from ${esc(E.fmtMD(r.from))}, your first expense.</p>` : ""}</header>
+      <div class="rv-body">
+        <section class="hero rv-hero" aria-label="Spent this ${unit}">
+          <div class="hero-top"><div><div class="eyebrow">Spent</div><div class="hero-amt">${fmt(r.total)}</div><div class="hero-of">of ${fmt(r.goal)} goal</div></div>${pill}</div>
+          <div class="hero-stats">
+            <div class="stat"><div class="label">${r.avgN ? esc(avgName) : "Your average"}</div><div class="val">${r.avgN ? fmt(r.avg) : "—"}</div><div class="sub">${v ? `You spent ${esc(v.mult)} that (${esc(v.pct)})` : r.avgN ? "" : `Nothing earlier to compare yet`}</div></div>
+            <div class="stat"><div class="label">Per day</div><div class="val">${fmt(Math.round(r.total / days))}</div><div class="sub">Goal ${fmt(Math.round(r.goal / days))} a day</div></div>
+          </div>
+        </section>
+        ${r.count ? `<p class="rv-lead">Take a moment with each one, then tick it.</p>
+          ${cats ? `<div class="section-title">Categories</div><ul class="rv-list">${cats}</ul>` : ""}
+          ${plats ? `<div class="section-title">Platforms</div><ul class="rv-list">${plats}</ul>` : ""}` : `<p class="rv-lead">Nothing spent this ${unit}.</p>`}
+      </div>
+      <footer class="rv-foot"><span class="rv-left" id="rv-left" aria-live="polite"></span><button class="btn primary" id="rv-done">Done</button></footer>
+    </section>`;
+    document.body.appendChild(wrap);
+    document.documentElement.classList.add("review-open");
+    hideTip();
+    review = { wrap, p };
+    const boxes = $$("[data-rv]", wrap), done = $("#rv-done", wrap), left = $("#rv-left", wrap);
+    const update = () => {
+      const n = boxes.filter((b) => !b.checked).length;
+      left.textContent = n ? `${n} left to tick` : boxes.length ? "All ticked" : "";
+      done.disabled = n > 0;
+    };
+    boxes.forEach((b) => { b.onchange = update; });
+    update();
+    // Keep focus inside, and there's no way out except Done
+    wrap.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); return; }
+      if (e.key !== "Tab") return;
+      const f = $$("input, button:not([disabled])", wrap);
+      if (!f.length) return;
+      const i = f.indexOf(document.activeElement);
+      if (e.shiftKey && i <= 0) { e.preventDefault(); f[f.length - 1].focus(); }
+      else if (!e.shiftKey && i === f.length - 1) { e.preventDefault(); f[0].focus(); }
+    });
+    setTimeout(() => { const h = $("#rv-title", wrap); if (h) h.focus({ preventScroll: true }); }, 30);
+    done.onclick = async () => {
+      if (done.disabled) return;
+      const bucket = wk ? "weeks" : "months", val = { at: nowISO(), total: r.total };
+      localAcks[bucket][p.key] = val;
+      S.acked = { weeks: Object.assign({}, S.acked.weeks, localAcks.weeks), months: Object.assign({}, S.acked.months, localAcks.months) };
+      wrap.remove();
+      document.documentElement.classList.remove("review-open");
+      review = null;
+      try { await saveAck(bucket, p.key, val); } catch (e) { toast(writeError(e)); }
+      setTimeout(maybeReview, 120);
+    };
   }
 
   // ---------- Category screens ----------

@@ -1,6 +1,6 @@
 # Spend Tracker
 
-A personal spending tracker with a Monday–Sunday weekly budget.
+A personal spending tracker with a Monday–Sunday weekly budget. Purchases made through a platform like Uber Eats or Amazon count under what you bought, and each finished week and month opens with a short review of every category.
 
 **Use it:** open the site on your phone, then Share → Add to Home Screen (iPhone) or ⋮ → Add to Home screen (Android). It opens like an app and works offline.
 
